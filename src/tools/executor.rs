@@ -148,7 +148,7 @@ impl ToolExecutor {
 
         // ── Safety checks for protected tools ──────────────────
         if PROTECTED_TOOLS.contains(&name) {
-            if let Err(e) = self.run_safety_checks(name, &args, config, positions).await {
+            if let Err(e) = self.run_safety_checks(name, &args, config, positions, pool_memory).await {
                 log_decision(name, &args, &e.to_string(), false);
                 return (format!("SAFETY CHECK FAILED: {}", e), true);
             }
@@ -193,6 +193,7 @@ impl ToolExecutor {
         args: &Value,
         config: &Config,
         positions: &PositionState,
+        pool_memory: &PoolMemoryStore,
     ) -> Result<()> {
         match name {
             "deploy_position" => {
@@ -235,6 +236,17 @@ impl ToolExecutor {
                     }
                 }
 
+                // Pool cooldown check
+                if pool_memory.is_on_cooldown(pool_addr) {
+                    anyhow::bail!("pool {} is on cooldown — recently closed at loss", &pool_addr[..12.min(pool_addr.len())]);
+                }
+                // Token cooldown check (check base_mint)
+                if let Some(base_mint) = args["base_mint"].as_str() {
+                    if !base_mint.is_empty() && pool_memory.is_on_cooldown(base_mint) {
+                        anyhow::bail!("token {} is on cooldown", &base_mint[..12.min(base_mint.len())]);
+                    }
+                }
+
                 // Bins below minimum check
                 let bins_below = args["bins_below"].as_i64().unwrap_or(20);
                 if bins_below < config.strategy.min_safe_bins_below as i64 {
@@ -264,6 +276,13 @@ impl ToolExecutor {
                     if fee_tvl < config.screening.min_fee_active_tvl_ratio {
                         anyhow::bail!("pool fee/TVL {:.4} below min {:.4}", fee_tvl, config.screening.min_fee_active_tvl_ratio);
                     }
+
+                    // Inject entry market data for position tracking
+                    info("executor", &format!(
+                        "Deploy pre-flight OK — pool={}, tvl=${:.0}, vol={}, fee_tvl={:.4}",
+                        &pool_addr[..12.min(pool_addr.len())],
+                        tvl, vol, fee_tvl
+                    ));
                 } else {
                     anyhow::bail!("could not verify pool before deploy");
                 }
@@ -327,6 +346,22 @@ impl ToolExecutor {
                         let note = format!("CLOSED low yield — avoid re-entry. Fees insufficient for TVL.");
                         pool_memory.add_note(&pool, &pos.base_mint, Some(&sym), &note);
                         info("executor", &format!("Auto-annotated pool memory for low-yield close: {}", sym));
+                    }
+                }
+
+                // Set cooldown on loss closes to prevent re-entry
+                if let Some(pos) = positions.positions.get(pid) {
+                    if let Some(pnl) = pos.pnl_sol {
+                        if pnl < 0.0 {
+                            // Cooldown pool for 1 hour
+                            pool_memory.set_cooldown(&pos.pool_address, "loss_close", 60);
+                            // Cooldown token too
+                            pool_memory.set_cooldown(&pos.base_mint, "loss_close", 60);
+                            info("executor", &format!(
+                                "Set 1h cooldown on pool/token after {:.4} SOL loss",
+                                pnl
+                            ));
+                        }
                     }
                 }
 

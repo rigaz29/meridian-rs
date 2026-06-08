@@ -118,6 +118,14 @@ async fn main() -> Result<()> {
                         for (addr, reason) in &exits {
                             info("pnl_poll", &format!("Exit needed: {} — {}", addr, reason));
                         }
+                        // Set instruction on positions needing close so management cycle picks them up
+                        for (addr, reason) in &exits {
+                            positions.set_instruction(addr, Some(&format!("CLOSE: {}", reason)));
+                        }
+                        // Save again after setting instructions
+                        if let Err(e) = positions.save(&state_path_pnl) {
+                            warn("pnl_poll", &format!("Failed to save state after instructions: {}", e));
+                        }
                     }
                 }
                 Err(e) => {
@@ -213,8 +221,18 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // TODO: fetch wallet SOL balance from Helius
-            let wallet_sol = 0.0f64;
+            // Fetch real wallet SOL balance
+            let wallet_sol = {
+                let rpc = config_screen.api.helius_rpc_url.as_deref().unwrap_or("https://api.mainnet-beta.solana.com");
+                let helius_key = config_screen.api.helius_api_key.as_deref().unwrap_or("");
+                match crate::tools::wallet::get_wallet_balances(rpc, &wallet_screen, helius_key).await {
+                    Ok(balances) => balances.sol,
+                    Err(e) => {
+                        warn("screen", &format!("Failed to fetch wallet balance: {}", e));
+                        0.0
+                    }
+                }
+            };
 
             match run_screening_cycle(&config_screen, &llm_screen, &mut positions, &mut pool_memory, wallet_sol, &wallet_screen).await {
                 Ok(result) => {
@@ -223,6 +241,11 @@ async fn main() -> Result<()> {
                 Err(e) => {
                     warn("screen", &format!("Screening cycle error: {}", e));
                 }
+            }
+
+            // Save state after screening (in case deploy happened)
+            if let Err(e) = positions.save(&screen_state_path) {
+                warn("screen", &format!("Failed to save state: {}", e));
             }
         }
     });

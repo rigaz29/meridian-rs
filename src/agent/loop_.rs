@@ -47,7 +47,15 @@ impl AgentLoop {
             ),
         );
 
-        let portfolio_json = r#"{"sol": 0, "note": "wallet stub"}"#;
+        // Fetch real wallet balance for agent prompt
+        let portfolio_json = {
+            let rpc = config.api.helius_rpc_url.as_deref().unwrap_or("https://api.mainnet-beta.solana.com");
+            let helius_key = config.api.helius_api_key.as_deref().unwrap_or("");
+            match crate::tools::wallet::get_wallet_balances(rpc, wallet_address, helius_key).await {
+                Ok(bal) => serde_json::json!({"sol": bal.sol, "usd": bal.total_usd}).to_string(),
+                Err(_) => r#"{"sol": 0, "note": "balance fetch failed"}"#.to_string(),
+            }
+        };
         let positions_json =
             serde_json::to_string(&positions.get_active()).unwrap_or_else(|_| "[]".to_string());
         let state_summary = pool_memory.get_summary_for_prompt();
@@ -57,7 +65,7 @@ impl AgentLoop {
         let system_prompt = build_system_prompt(
             &role,
             config,
-            portfolio_json,
+            &portfolio_json,
             &positions_json,
             &state_summary,
             lessons,

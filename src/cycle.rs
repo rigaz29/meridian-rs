@@ -89,27 +89,48 @@ pub async fn run_management_cycle(
         }
     }
 
-    // ── 2. Build position data + update trailing state ─────────
-    // Clone the position data we need to avoid borrow conflicts
-    let pos_snapshots: Vec<(String, Option<f64>, bool, Option<f64>, Option<String>, i32, i32, i32, u32, u32)> =
-        positions
-            .get_active()
-            .iter()
-            .map(|p| {
-                (
-                    p.id.clone(),
-                    p.pnl_sol.map(|_| 0.0), // pnl_pct placeholder
-                    p.out_of_range_since.is_none(),
-                    None, // fee_per_tvl_24h placeholder
-                    p.instruction.clone(),
-                    p.upper_bin,
-                    p.lower_bin,
-                    0,    // active_bin placeholder
-                    minutes_out_of_range(p),
-                    position_age_minutes(p),
-                )
-            })
-            .collect();
+    // ── 2. Fetch real PnL + active_bin for each position ────────
+    let active = positions.get_active();
+    let mut pos_snapshots: Vec<(String, Option<f64>, bool, Option<f64>, Option<String>, i32, i32, i32, u32, u32)> = Vec::new();
+
+    for p in &active {
+        let mut pnl_sol: Option<f64> = None;
+        let mut fee_tvl: Option<f64> = None;
+        let mut active_bin = 0i32;
+
+        // Fetch real PnL from Meteora API
+        if let Ok(pnl_result) = crate::tools::dlmm::get_position_pnl(
+            &p.pool_address, &p.id, wallet_address,
+        ).await {
+            pnl_sol = pnl_result.pnl_usd;
+            fee_tvl = pnl_result.fee_per_tvl_24h;
+            if let Some(ab) = pnl_result.active_bin {
+                active_bin = ab;
+            }
+        }
+
+        // Fallback: fetch active_bin separately if PnL didn't provide it
+        if active_bin == 0 {
+            if let Ok(bin_result) = crate::tools::dlmm::get_active_bin(&p.pool_address).await {
+                active_bin = bin_result.bin_id;
+            }
+        }
+
+        let in_range = active_bin >= p.lower_bin && active_bin <= p.upper_bin;
+
+        pos_snapshots.push((
+            p.id.clone(),
+            pnl_sol,
+            in_range,
+            fee_tvl,
+            p.instruction.clone(),
+            p.upper_bin,
+            p.lower_bin,
+            active_bin,
+            minutes_out_of_range(p),
+            position_age_minutes(p),
+        ));
+    }
 
     // Update trailing state for each position
     for (addr, pnl_opt, _, _, _, _, _, _, _, _) in &pos_snapshots {
@@ -226,7 +247,7 @@ pub async fn run_pnl_poll(
     }
 
     // Fetch real PnL + active_bin for each position
-    let mut pos_data: Vec<(String, Option<f64>, bool, i32, i32, u32, Option<f64>)> = Vec::new();
+    let mut pos_data: Vec<(String, Option<f64>, bool, i32, i32, u32, Option<f64>, i32)> = Vec::new();
     for p in &active {
         let mut pnl_sol: Option<f64> = None;
         let mut fee_tvl: Option<f64> = None;
@@ -262,12 +283,13 @@ pub async fn run_pnl_poll(
             p.lower_bin,
             minutes_out_of_range(p),
             fee_tvl,
+            active_bin,
         ));
     }
- 
+
     let mut exits_needed: Vec<(String, String)> = vec![];
 
-    for (addr, pnl_opt, in_range, upper, _lower, oor_mins, fee_tvl_opt) in &pos_data {
+    for (addr, pnl_opt, in_range, upper, _lower, oor_mins, fee_tvl_opt, active_bin) in &pos_data {
         // Update trailing state
         if let Some(pnl) = pnl_opt {
             if let Some(pos) = positions.positions.get_mut(addr) {
@@ -290,7 +312,7 @@ pub async fn run_pnl_poll(
         // Check deterministic close rules
         if let (Some(pnl), fee_tvl) = (pnl_opt, fee_tvl_opt.unwrap_or(0.001)) {
             if let Some(pos) = positions.positions.get(addr) {
-                if let Some(rule) = get_deterministic_close_rule(pos, 0, *pnl, fee_tvl, *oor_mins, config) {
+                if let Some(rule) = get_deterministic_close_rule(pos, *active_bin, *pnl, fee_tvl, *oor_mins, config) {
                     let reason = match rule {
                         CloseRule::StopLoss => "stop loss",
                         CloseRule::TakeProfit => "take profit",
