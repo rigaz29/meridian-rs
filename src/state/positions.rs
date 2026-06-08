@@ -3,19 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use chrono::Utc;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TrackedPosition {
-    pub id: String,
-    pub pool_address: String,
-    pub base_mint: String,
-    pub lower_bin: i32,
-    pub upper_bin: i32,
-    pub amount_sol: f64,
-    pub status: String,
-    pub created_at: String,
-    pub note: Option<String>,
-}
+// Re-export the position types
+pub use crate::models::position::{TrackedPosition, PositionStatus};
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct PositionState {
@@ -24,33 +15,68 @@ pub struct PositionState {
 
 impl PositionState {
     pub fn load(path: &str) -> Result<Self> {
-        if Path::new(path).exists() {
+        let p = Path::new(path);
+        if p.exists() {
             let content = fs::read_to_string(path)?;
-            let state: PositionState = serde_json::from_str(&content)?;
-            Ok(state)
+            Ok(serde_json::from_str(&content).unwrap_or_default())
         } else {
-            Ok(PositionState::default())
+            Ok(Self::default())
         }
     }
 
     pub fn save(&self, path: &str) -> Result<()> {
-        let content = serde_json::to_string_pretty(self)?;
-        fs::write(path, content)?;
+        fs::write(path, serde_json::to_string_pretty(self)?)?;
         Ok(())
     }
 
-    pub fn add_position(&mut self, position: TrackedPosition) {
-        self.positions.insert(position.id.clone(), position);
+    pub fn add(&mut self, pos: TrackedPosition) {
+        self.positions.insert(pos.id.clone(), pos);
     }
 
-    pub fn remove_position(&mut self, id: &str) {
+    pub fn remove(&mut self, id: &str) {
         self.positions.remove(id);
     }
 
-    pub fn get_active_positions(&self) -> Vec<&TrackedPosition> {
-        self.positions
-            .values()
-            .filter(|p| p.status == "active")
+    pub fn get_active(&self) -> Vec<&TrackedPosition> {
+        self.positions.values()
+            .filter(|p| p.status == PositionStatus::Active || p.status == PositionStatus::OutOfRange)
             .collect()
+    }
+
+    pub fn count_active(&self) -> usize {
+        self.positions.values()
+            .filter(|p| p.status == PositionStatus::Active || p.status == PositionStatus::OutOfRange)
+            .count()
+    }
+
+    pub fn mark_oor(&mut self, id: &str) {
+        if let Some(p) = self.positions.get_mut(id) {
+            if p.status == PositionStatus::Active {
+                p.status = PositionStatus::OutOfRange;
+                p.out_of_range_since = Some(Utc::now().to_rfc3339());
+            }
+        }
+    }
+
+    pub fn mark_in_range(&mut self, id: &str) {
+        if let Some(p) = self.positions.get_mut(id) {
+            if p.status == PositionStatus::OutOfRange {
+                p.status = PositionStatus::Active;
+                p.out_of_range_since = None;
+            }
+        }
+    }
+
+    pub fn record_claim(&mut self, id: &str, fees: f64) {
+        if let Some(p) = self.positions.get_mut(id) {
+            p.total_fees_claimed += fees;
+        }
+    }
+
+    pub fn record_close(&mut self, id: &str, pnl: f64) {
+        if let Some(p) = self.positions.get_mut(id) {
+            p.status = PositionStatus::Closed;
+            p.pnl_sol = Some(pnl);
+        }
     }
 }

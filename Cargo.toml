@@ -1,6 +1,6 @@
 [package]
 name = "meridian-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
@@ -11,11 +11,17 @@ serde_json = "1"
 reqwest = { version = "0.12", features = ["json"] }
 dotenvy = "0.15"
 chrono = "0.4"
+tracing = "0.1"
+tracing-subscriber = "0.3"
 
 # Solana
 solana-sdk = "2"
 solana-client = "2"
 
-# Web Framework (for future HyperOS-style UI)
+# Web Framework
 axum = "0.7"
 tower-http = { version = "0.5", features = ["cors"] }
+
+# Regex for intent matching
+regex = "1"
+urlencoding = "2"
