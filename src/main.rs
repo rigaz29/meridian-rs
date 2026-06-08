@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use anyhow::Result;
+use chrono::Timelike;
 use tokio::signal;
 use tokio::sync::watch;
 
@@ -246,6 +247,77 @@ async fn main() -> Result<()> {
             // Save state after screening (in case deploy happened)
             if let Err(e) = positions.save(&screen_state_path) {
                 warn("screen", &format!("Failed to save state: {}", e));
+            }
+        }
+    });
+
+
+    // ── Briefing Cycle (daily at 01:00 UTC) ─────────────────────
+    let config_brief = config.clone();
+    let state_brief = state_path.clone();
+    let wallet_brief = wallet_address.clone();
+    let mut shutdown_brief = shutdown_rx.clone();
+
+    tokio::spawn(async move {
+        // Run briefing once at startup if it's between 01:00-02:00 UTC
+        let now = chrono::Utc::now();
+        let hour = now.hour();
+        let minute = now.minute();
+        let mut ran_today = hour == 1 && minute < 30;
+
+        let mut interval = tokio::time::Duration::from_secs(3600); // check every hour
+        let mut tick = tokio::time::interval(interval);
+        tick.tick().await;
+
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {}
+                _ = shutdown_brief.changed() => {
+                    info("briefing", "Shutdown signal received");
+                    break;
+                }
+            }
+
+            let now = chrono::Utc::now();
+            if now.hour() == 1 && !ran_today {
+                ran_today = true;
+
+                // Build briefing
+                let positions = match PositionState::load(&state_brief) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn("briefing", &format!("Failed to load positions: {}", e));
+                        continue;
+                    }
+                };
+
+                let state_summary = positions.get_state_summary();
+                let active = positions.get_active();
+                let active_count = active.len();
+
+                let mut briefing = format!(
+                    "📊 *Meridian Daily Briefing*\n{}\n\n*Open Positions:* {}\n\n{}",
+                    now.format("%Y-%m-%d %H:%M UTC"),
+                    active_count,
+                    state_summary,
+                );
+
+                // Send via Telegram if configured
+                if let (Some(bot_token), Some(chat_id)) = (
+                    config_brief.api.telegram_bot_token.as_deref(),
+                    config_brief.api.telegram_chat_id.as_deref(),
+                ) {
+                    if let Err(e) = crate::tools::telegram::send_message_safe(bot_token, chat_id, &briefing).await {
+                        warn("briefing", &format!("Telegram send failed: {}", e));
+                    } else {
+                        info("briefing", "Daily briefing sent to Telegram");
+                    }
+                }
+
+                // Reset ran_today at midnight UTC
+                if now.hour() == 23 {
+                    ran_today = false;
+                }
             }
         }
     });

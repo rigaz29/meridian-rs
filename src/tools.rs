@@ -2,6 +2,7 @@ pub mod definitions;
 pub mod dlmm;
 pub mod executor;
 pub mod screening;
+pub mod telegram;
 pub mod wallet;
 pub mod token;
 pub mod blacklist;

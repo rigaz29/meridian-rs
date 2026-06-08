@@ -4,6 +4,32 @@ use std::collections::HashMap;
 
 use crate::config::Config;
 
+/// Path to the Meridian JS CLI — used for on-chain operations
+/// (deploy, close, claim) that require the Meteora DLMM SDK.
+fn meridian_cli() -> String {
+    std::env::var("MERIDIAN_CLI").unwrap_or_else(|_| "/root/meridian/cli.js".to_string())
+}
+
+/// Execute a Meridian JS CLI command and parse JSON output.
+async fn cli_exec(args: &[&str]) -> Result<serde_json::Value> {
+    let output = tokio::process::Command::new("node")
+        .arg(meridian_cli())
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| anyhow!("Failed to spawn meridian CLI: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        anyhow::bail!("CLI error (exit {}): {}", output.status.code().unwrap_or(-1), stderr);
+    }
+
+    serde_json::from_str(&stdout)
+        .map_err(|e| anyhow!("Failed to parse CLI JSON output: {} — stdout: {}", e, &stdout[..stdout.len().min(200)]))
+}
+
 /// Meteora DLMM program ID.
 pub const DLMM_PROGRAM_ID: &str = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo";
 
@@ -823,35 +849,85 @@ pub async fn deploy_position(
         .and_then(|m| m.extra.get("base_fee_percentage"))
         .and_then(|v| v.as_f64());
 
-    // NOTE: In a full implementation, this would:
-    // 1. Load the DLMM SDK
-    // 2. Call pool.initializePositionAndAddLiquidityByStrategy()
-    // 3. Sign and send the transaction
-    // For now, return a result indicating what would be deployed.
+    // Execute deploy via Meridian JS CLI (uses @meteora-ag/dlmm SDK)
+    let amount_str = format!("{:.4}", amount_sol);
+    let bins_below_str = bins_below_val.to_string();
+    let bins_above_str = bins_above_val.to_string();
+    let mut cli_args: Vec<&str> = vec![
+        "deploy",
+        "--pool", &pool_address,
+        "--amount", &amount_str,
+        "--bins-below", &bins_below_str,
+        "--bins-above", &bins_above_str,
+        "--strategy", strategy_str,
+    ];
 
-    Ok(DeployResult {
-        success: false,
-        position: None,
-        pool: Some(pool_address),
-        pool_name: pool_meta
-            .as_ref()
-            .and_then(|m| m.name.clone()),
-        bin_range: Some(BinRange {
-            min: min_bin_id,
-            max: max_bin_id,
-            active: Some(active_bin.bin_id),
-        }),
-        price_range: None,
-        bin_step,
-        base_fee,
-        strategy: Some(strategy_str.to_string()),
-        wide_range: Some(is_wide_range),
-        amount_x: Some(0.0),
-        amount_y: Some(amount_sol),
-        txs: None,
-        error: None,
-        note: Some("Deploy transaction building not yet implemented in Rust (requires Meteora DLMM SDK integration)".to_string()),
-    })
+    if std::env::var("DRY_RUN").ok().as_deref() == Some("true") {
+        cli_args.push("--dry-run");
+    }
+
+    match cli_exec(&cli_args).await {
+        Ok(result) => {
+            let position_addr = result.get("position").and_then(|v| v.as_str()).map(String::from);
+            let txs = result.get("txs").and_then(|v| v.as_str()).map(String::from);
+            let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+            let error = if !success {
+                result.get("error").and_then(|v| v.as_str()).map(String::from)
+            } else {
+                None
+            };
+
+            Ok(DeployResult {
+                success,
+                position: position_addr.clone(),
+                pool: Some(pool_address),
+                pool_name: pool_meta
+                    .as_ref()
+                    .and_then(|m| m.name.clone()),
+                bin_range: Some(BinRange {
+                    min: min_bin_id,
+                    max: max_bin_id,
+                    active: Some(active_bin.bin_id),
+                }),
+                price_range: None,
+                bin_step,
+                base_fee,
+                strategy: Some(strategy_str.to_string()),
+                wide_range: Some(is_wide_range),
+                amount_x: Some(0.0),
+                amount_y: Some(amount_sol),
+                txs: txs.map(|t| vec![t]),
+                error,
+                note: result.get("note").and_then(|v| v.as_str()).map(String::from),
+            })
+        }
+        Err(e) => {
+            tracing::error!("deploy_position CLI failed: {}", e);
+            Ok(DeployResult {
+                success: false,
+                position: None,
+                pool: Some(pool_address),
+                pool_name: pool_meta
+                    .as_ref()
+                    .and_then(|m| m.name.clone()),
+                bin_range: Some(BinRange {
+                    min: min_bin_id,
+                    max: max_bin_id,
+                    active: Some(active_bin.bin_id),
+                }),
+                price_range: None,
+                bin_step,
+                base_fee,
+                strategy: Some(strategy_str.to_string()),
+                wide_range: Some(is_wide_range),
+                amount_x: Some(0.0),
+                amount_y: Some(amount_sol),
+                txs: None,
+                error: Some(format!("CLI execution failed: {}", e)),
+                note: None,
+            })
+        }
+    }
 }
 
 /// Close a DLMM position and withdraw liquidity.
@@ -888,27 +964,69 @@ pub async fn close_position(
         reason.unwrap_or("agent decision"),
     );
 
-    // NOTE: In a full implementation, this would:
-    // 1. Load the DLMM SDK
-    // 2. Call pool.claimSwapFee() to claim pending fees
-    // 3. Call pool.removeLiquidity() to withdraw all liquidity
-    // 4. Call pool.closePosition() to close the account
-    // 5. Sign and send transactions
-    // For now, return a result indicating what would be closed.
+    // Execute close via Meridian JS CLI
+    let mut cli_args = vec![
+        "close",
+        "--position", &position_address,
+    ];
 
-    Ok(CloseResult {
-        success: false,
-        position: Some(position_address),
-        pool: None,
-        pool_name: None,
-        claim_txs: None,
-        close_txs: None,
-        txs: None,
-        pnl_usd: None,
-        pnl_pct: None,
-        base_mint: None,
-        error: Some("Close transaction building not yet implemented in Rust (requires Meteora DLMM SDK integration)".to_string()),
-    })
+    if std::env::var("DRY_RUN").ok().as_deref() == Some("true") {
+        cli_args.push("--dry-run");
+    }
+
+    match cli_exec(&cli_args).await {
+        Ok(result) => {
+            let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+            let pool = result.get("pool").and_then(|v| v.as_str()).map(String::from);
+            let pool_name = result.get("pool_name").and_then(|v| v.as_str()).map(String::from);
+            let pnl_usd = result.get("pnl_usd").and_then(|v| v.as_f64());
+            let pnl_pct = result.get("pnl_pct").and_then(|v| v.as_f64());
+            let base_mint = result.get("base_mint").and_then(|v| v.as_str()).map(String::from);
+            let claim_txs = result.get("claim_txs").and_then(|v| v.as_str()).map(String::from);
+            let close_txs = result.get("close_txs").and_then(|v| v.as_str()).map(String::from);
+            let txs = result.get("txs").and_then(|v| v.as_str()).map(String::from);
+            let error = if !success {
+                result.get("error").and_then(|v| v.as_str()).map(String::from)
+            } else {
+                None
+            };
+
+            tracing::info!(
+                "close_position result: success={} pnl_usd={:?} pnl_pct={:?}",
+                success, pnl_usd, pnl_pct,
+            );
+
+            Ok(CloseResult {
+                success,
+                position: Some(position_address),
+                pool,
+                pool_name,
+                claim_txs: claim_txs.map(|t| vec![t]),
+                close_txs: close_txs.map(|t| vec![t]),
+                txs: txs.map(|t| vec![t]),
+                pnl_usd,
+                pnl_pct,
+                base_mint,
+                error,
+            })
+        }
+        Err(e) => {
+            tracing::error!("close_position CLI failed: {}", e);
+            Ok(CloseResult {
+                success: false,
+                position: Some(position_address),
+                pool: None,
+                pool_name: None,
+                claim_txs: None,
+                close_txs: None,
+                txs: None,
+                pnl_usd: None,
+                pnl_pct: None,
+                base_mint: None,
+                error: Some(format!("CLI execution failed: {}", e)),
+            })
+        }
+    }
 }
 
 /// Claim accumulated fees from a DLMM position.
@@ -937,20 +1055,47 @@ pub async fn claim_fees(
         &position_address[..8.min(position_address.len())],
     );
 
-    // NOTE: In a full implementation, this would:
-    // 1. Load the DLMM SDK
-    // 2. Get the position data from the pool
-    // 3. Call pool.claimSwapFee() with the position
-    // 4. Sign and send the transaction
-    // For now, return a result indicating what would be claimed.
+    // Execute claim via Meridian JS CLI
+    let cli_args = vec![
+        "claim",
+        "--position", &position_address,
+    ];
 
-    Ok(ClaimResult {
-        success: false,
-        position: Some(position_address),
-        txs: None,
-        base_mint: None,
-        error: Some("Claim transaction building not yet implemented in Rust (requires Meteora DLMM SDK integration)".to_string()),
-    })
+    match cli_exec(&cli_args).await {
+        Ok(result) => {
+            let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+            let txs = result.get("txs").and_then(|v| v.as_str()).map(String::from);
+            let base_mint = result.get("base_mint").and_then(|v| v.as_str()).map(String::from);
+            let error = if !success {
+                result.get("error").and_then(|v| v.as_str()).map(String::from)
+            } else {
+                None
+            };
+
+            tracing::info!(
+                "claim_fees result: success={} base_mint={:?}",
+                success, base_mint,
+            );
+
+            Ok(ClaimResult {
+                success,
+                position: Some(position_address),
+                txs: txs.map(|t| vec![t]),
+                base_mint,
+                error,
+            })
+        }
+        Err(e) => {
+            tracing::error!("claim_fees CLI failed: {}", e);
+            Ok(ClaimResult {
+                success: false,
+                position: Some(position_address),
+                txs: None,
+                base_mint: None,
+                error: Some(format!("CLI execution failed: {}", e)),
+            })
+        }
+    }
 }
 
 /// Search for DLMM pools by token symbol or address.

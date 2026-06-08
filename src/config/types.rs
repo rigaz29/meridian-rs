@@ -221,6 +221,10 @@ pub struct ApiConfig {
     pub agent_meridian_base: Option<String>,
     #[serde(default)]
     pub agent_meridian_key: Option<String>,
+    #[serde(default)]
+    pub telegram_bot_token: Option<String>,
+    #[serde(default)]
+    pub telegram_chat_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
