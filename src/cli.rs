@@ -15,6 +15,7 @@ use crate::tools::dlmm::{
     claim_fees, close_position, deploy_position, get_my_positions, get_position_pnl,
 };
 use crate::tools::screening::Screener;
+use crate::tools::study::study_top_lpers;
 use crate::tools::wallet::{get_wallet_balances, swap_token};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -158,6 +159,10 @@ pub enum CliCommand {
     Candidates {
         limit: Option<usize>,
     },
+    Study {
+        pool: String,
+        limit: Option<usize>,
+    },
     Screen {
         wallet: Option<String>,
         wallet_sol: Option<f64>,
@@ -233,6 +238,7 @@ pub fn help_text() -> String {
         "  meridian positions [--wallet <addr>]",
         "  meridian pnl --pool <pool> --position <position> [--wallet <addr>]",
         "  meridian candidates [--limit <n>]",
+        "  meridian study --pool <addr> [--limit <n>]",
         "  meridian screen [--wallet <addr>] [--wallet-sol <sol>]",
         "  meridian manage [--wallet <addr>]",
         "  meridian deploy --pool <pool> --amount <sol> [--bins-below <n>] [--bins-above <n>] [--strategy spot|curve|bid_ask] [--dry-run]",
@@ -279,6 +285,13 @@ pub fn parse_cli_args(args: &[String]) -> Result<Option<CliCommand>> {
             wallet: optional_flag(tail, &["--wallet", "-w"]),
         })),
         "candidates" => Ok(Some(CliCommand::Candidates {
+            limit: optional_flag(tail, &["--limit", "-n"])
+                .map(|value| parse_usize("--limit", &value))
+                .transpose()?,
+        })),
+        "study" => Ok(Some(CliCommand::Study {
+            pool: required_flag(tail, &["--pool", "--pool-address"])?
+                .ok_or_else(|| anyhow!("study requires --pool <pool>"))?,
             limit: optional_flag(tail, &["--limit", "-n"])
                 .map(|value| parse_usize("--limit", &value))
                 .transpose()?,
@@ -594,6 +607,7 @@ pub fn command_name(command: &CliCommand) -> &'static str {
         CliCommand::Positions { .. } => "positions",
         CliCommand::Pnl { .. } => "pnl",
         CliCommand::Candidates { .. } => "candidates",
+        CliCommand::Study { .. } => "study",
         CliCommand::Screen { .. } => "screen",
         CliCommand::Manage { .. } => "manage",
         CliCommand::Deploy { .. } => "deploy",
@@ -1253,6 +1267,10 @@ pub async fn run_cli_command(
                 }),
             ))
         }
+        CliCommand::Study { pool, limit } => json_command_result(
+            "study",
+            study_top_lpers(&pool, limit.unwrap_or(4), config).await?,
+        ),
         CliCommand::Screen { wallet, wallet_sol } => {
             let mut positions = PositionState::load(state_path).unwrap_or_default();
             let pool_memory_path = pool_memory_path_for_state(state_path);
@@ -1599,6 +1617,16 @@ mod tests {
         assert_eq!(
             parse_cli_args(&args(&["meridian", "candidates", "--limit", "7"])).unwrap(),
             Some(CliCommand::Candidates { limit: Some(7) })
+        );
+        assert_eq!(
+            parse_cli_args(&args(&[
+                "meridian", "study", "--pool", "Pool111", "--limit", "3",
+            ]))
+            .unwrap(),
+            Some(CliCommand::Study {
+                pool: "Pool111".to_string(),
+                limit: Some(3),
+            })
         );
     }
 
@@ -2135,6 +2163,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_cli_study_dry_run_uses_json_envelope_without_network() {
+        let config = Config {
+            dry_run: true,
+            ..Config::default()
+        };
+        let output = run_cli_command(
+            CliCommand::Study {
+                pool: "Pool111".to_string(),
+                limit: Some(4),
+            },
+            &config,
+            "unused-state.json",
+        )
+        .await
+        .expect("dry-run study should not need network");
+        let rendered = output.render().expect("json output should render");
+        let parsed: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
+
+        assert_eq!(parsed["success"], true);
+        assert_eq!(parsed["command"], "study");
+        assert_eq!(parsed["data"]["pool"], "Pool111");
+        assert!(parsed["data"]["lpers"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn run_cli_screen_zero_wallet_sol_uses_one_shot_json() {
         let dir = unique_test_dir("screen-oneshot");
         std::fs::create_dir_all(&dir).expect("test dir should be created");
@@ -2207,6 +2260,13 @@ mod tests {
                 "pnl",
             ),
             (CliCommand::Candidates { limit: None }, "candidates"),
+            (
+                CliCommand::Study {
+                    pool: "Pool111".to_string(),
+                    limit: None,
+                },
+                "study",
+            ),
             (
                 CliCommand::Deploy {
                     pool: "Pool111".to_string(),

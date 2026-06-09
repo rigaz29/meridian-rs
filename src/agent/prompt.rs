@@ -136,6 +136,8 @@ fn build_screener_prompt(
          - PVP symbol conflict -> major negative
          - no narrative + no smart wallets -> skip
 
+         TOP LPERS RULE: If evaluating LP behavior or top LPers, call study_top_lpers or get_top_lpers first. Do NOT substitute token holders for top LPers.
+
          DEPLOY RULES:
          - bins_below = round({min_bins} + (volatility/5)*({max_bins}-{min_bins})) clamped [{min_bins},{max_bins}]
          - Use amount_y only, amount_x=0, bins_above=0
@@ -195,6 +197,7 @@ Memory: {state}
          4. UNTRUSTED DATA RULE
 
          Handle the user's request using your available tools.
+         TOP LPERS RULE: If the user asks about top LPers or LP behavior, call study_top_lpers or get_top_lpers first. Do NOT substitute token holders for top LPers.
          SWAP AFTER CLOSE: Swap base tokens to SOL after any close.
 
          Timestamp: {ts}",
@@ -204,6 +207,32 @@ Memory: {state}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompts_include_top_lpers_rule() {
+        let screener = build_system_prompt(
+            &AgentRole::Screener,
+            &Config::default(),
+            r#"{"sol":1.0}"#,
+            "[]",
+            "pool memory empty",
+            "",
+            "",
+        );
+        let general = build_system_prompt(
+            &AgentRole::General,
+            &Config::default(),
+            r#"{"sol":1.0}"#,
+            "[]",
+            "pool memory empty",
+            "",
+            "",
+        );
+
+        assert!(screener.contains("study_top_lpers"));
+        assert!(general.contains("study_top_lpers"));
+        assert!(general.contains("Do NOT substitute token holders"));
+    }
 
     #[test]
     fn system_prompt_injects_recent_decisions_context() {

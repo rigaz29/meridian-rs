@@ -12,6 +12,7 @@ use crate::tools::dlmm::{
     get_wallet_positions, search_pools,
 };
 use crate::tools::screening::Screener;
+use crate::tools::study::study_top_lpers;
 use crate::tools::token::{
     check_smart_wallets_on_pool, get_token_holders, get_token_info, get_token_narrative,
 };
@@ -899,6 +900,21 @@ impl ToolExecutor {
                     Err(e) => Ok(format!("{{\"error\": \"{}\"}}", e)),
                 }
             }
+            "study_top_lpers" | "get_top_lpers" => {
+                let pool = args["pool_address"]
+                    .as_str()
+                    .or_else(|| args["pool"].as_str())
+                    .unwrap_or("");
+                if pool.is_empty() {
+                    anyhow::bail!("pool_address required");
+                }
+                let default_limit = if name == "get_top_lpers" { 5 } else { 4 };
+                let limit = args["limit"].as_u64().unwrap_or(default_limit).clamp(1, 25) as usize;
+                match study_top_lpers(pool, limit, config).await {
+                    Ok(result) => Ok(serde_json::to_string_pretty(&result)?),
+                    Err(e) => Ok(format!("{{\"error\": \"{}\"}}", e)),
+                }
+            }
 
             // ── Pool memory ────────────────────────────────────
             "get_pool_memory" => Ok(pool_memory.get_summary_for_prompt()),
@@ -1419,6 +1435,39 @@ mod tests {
         assert_eq!(parsed["path"], lessons_path.display().to_string());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn top_lper_dispatch_uses_dry_run_no_network_fallback() {
+        let mut executor = ToolExecutor::new("wallet");
+        let mut positions = PositionState::default();
+        let mut pool_memory = PoolMemoryStore::default();
+        let config = Config {
+            dry_run: true,
+            ..Config::default()
+        };
+        let output = tokio::runtime::Runtime::new()
+            .expect("tokio runtime should start")
+            .block_on(async {
+                executor
+                    .dispatch(
+                        "study_top_lpers",
+                        &json!({"pool_address": "Pool111", "limit": 3}),
+                        &config,
+                        &mut positions,
+                        &mut pool_memory,
+                    )
+                    .await
+            })
+            .expect("study_top_lpers should return JSON in dry-run mode");
+        let parsed: Value = serde_json::from_str(&output).expect("output should be JSON");
+
+        assert_eq!(parsed["pool"], "Pool111");
+        assert!(parsed["message"]
+            .as_str()
+            .expect("message should be present")
+            .contains("No LPAgent top LPer data"));
+        assert!(parsed["lpers"].as_array().unwrap().is_empty());
     }
 
     #[test]

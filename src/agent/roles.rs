@@ -29,6 +29,8 @@ static SCREENER_TOOLS: &[&str] = &[
     "get_active_bin",
     "get_top_candidates",
     "check_smart_wallets_on_pool",
+    "study_top_lpers",
+    "get_top_lpers",
     "get_token_holders",
     "get_token_narrative",
     "get_token_info",
@@ -113,9 +115,23 @@ static INTENT_MAP: &[IntentPattern] = &[
         pattern: r"(?i)\b(strategy|strategies|active strategy|lp strat)\b",
     },
     IntentPattern {
+        intent: "study",
+        tools: &[
+            "study_top_lpers",
+            "get_top_lpers",
+            "get_top_candidates",
+            "get_token_info",
+            "search_pools",
+            "discover_pools",
+        ],
+        pattern: r"(?i)\b(study top|top lpers?|best lpers?|who.?s lping|lp behavior|lpers?)\b",
+    },
+    IntentPattern {
         intent: "screen",
         tools: &[
             "get_top_candidates",
+            "study_top_lpers",
+            "get_top_lpers",
             "get_token_holders",
             "get_token_narrative",
             "get_token_info",
@@ -161,6 +177,8 @@ fn get_general_tools(goal: &str) -> Vec<String> {
             "get_token_narrative",
             "get_pool_memory",
             "check_smart_wallets_on_pool",
+            "study_top_lpers",
+            "get_top_lpers",
             "get_active_bin",
             "discover_pools",
         ]
@@ -201,6 +219,24 @@ mod tests {
                 role,
                 tools
             );
+        }
+    }
+
+    #[test]
+    fn top_lper_tools_are_available_for_screener_and_general_study_intent() {
+        let screener_tools = get_tools_for_role(&AgentRole::Screener, "screen pools");
+        let general_tools = get_tools_for_role(
+            &AgentRole::General,
+            "study top LPers and LP behavior for this pool",
+        );
+
+        for tools in [&screener_tools, &general_tools] {
+            for name in ["study_top_lpers", "get_top_lpers"] {
+                assert!(
+                    tools.iter().any(|tool| tool == name),
+                    "top-LPer intent should include {name}; tools={tools:?}"
+                );
+            }
         }
     }
 

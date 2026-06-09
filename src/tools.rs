@@ -6,6 +6,7 @@ pub mod executor;
 pub mod meteora_native;
 pub mod screening;
 pub mod smart_wallets;
+pub mod study;
 pub mod telegram;
 pub mod token;
 pub mod wallet;

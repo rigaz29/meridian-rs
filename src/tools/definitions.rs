@@ -182,6 +182,30 @@ pub fn get_all_tool_definitions() -> Vec<ToolDefinition> {
             }),
         ),
         tool(
+            "get_top_lpers",
+            "Get the top open LPers for a pool by address using Agent Meridian LPAgent data",
+            json!({
+                "type": "object",
+                "properties": {
+                    "pool_address": {"type": "string", "description": "Pool address to look up top LPers for"},
+                    "limit": {"type": "integer", "description": "Number of top LPers to return (default 5)"}
+                },
+                "required": ["pool_address"]
+            }),
+        ),
+        tool(
+            "study_top_lpers",
+            "Fetch and analyze top open LPers for a pool to learn behavior patterns, hold times, win rates, and range styles before deploying",
+            json!({
+                "type": "object",
+                "properties": {
+                    "pool_address": {"type": "string", "description": "Pool address to study top LPers for"},
+                    "limit": {"type": "integer", "description": "Number of top LPers to study (default 4)"}
+                },
+                "required": ["pool_address"]
+            }),
+        ),
+        tool(
             "get_pool_memory",
             "Get pool history and notes",
             json!({
@@ -400,6 +424,31 @@ mod tests {
             tool.function.parameters["properties"]["limit"]["type"],
             "integer"
         );
+    }
+
+    #[test]
+    fn top_lper_tools_are_defined_for_llm_use() {
+        let tools = get_all_tool_definitions();
+        for name in ["get_top_lpers", "study_top_lpers"] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.function.name == name)
+                .unwrap_or_else(|| panic!("{name} should be exposed as an LLM tool"));
+            assert!(tool
+                .function
+                .description
+                .to_ascii_lowercase()
+                .contains("lpers"));
+            assert_eq!(
+                tool.function.parameters["properties"]["pool_address"]["type"],
+                "string"
+            );
+            assert_eq!(
+                tool.function.parameters["properties"]["limit"]["type"],
+                "integer"
+            );
+            assert_eq!(tool.function.parameters["required"][0], "pool_address");
+        }
     }
 
     #[test]
