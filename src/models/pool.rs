@@ -74,6 +74,24 @@ pub struct CondensedPool {
     pub top10_pct: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discord_signal: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_pvp: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pvp_risk: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pvp_symbol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pvp_rival_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pvp_rival_mint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pvp_rival_pool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pvp_rival_tvl: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pvp_rival_holders: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pvp_rival_fees: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

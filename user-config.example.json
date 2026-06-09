@@ -18,7 +18,9 @@
     "blockedLaunchpads": [],
     "allowedLaunchpads": [],
     "useDiscordSignals": false,
-    "discordSignalMode": "merge"
+    "discordSignalMode": "merge",
+    "avoidPvpSymbols": true,
+    "blockPvpSymbols": false
   },
   "management": {
     "deployAmountSol": 0.5,

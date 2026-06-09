@@ -67,6 +67,10 @@ pub struct ScreeningConfig {
     pub use_discord_signals: bool,
     #[serde(default)]
     pub discord_signal_mode: Option<String>,
+    #[serde(default = "default_avoid_pvp_symbols")]
+    pub avoid_pvp_symbols: bool,
+    #[serde(default)]
+    pub block_pvp_symbols: bool,
 }
 
 fn default_min_quote_organic() -> f64 {
@@ -83,6 +87,9 @@ fn default_max_bot_holders() -> f64 {
 }
 fn default_max_top10() -> f64 {
     60.0
+}
+fn default_avoid_pvp_symbols() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -437,6 +444,8 @@ impl Default for Config {
                 max_token_age_hours: None,
                 use_discord_signals: false,
                 discord_signal_mode: None,
+                avoid_pvp_symbols: true,
+                block_pvp_symbols: false,
             },
             management: ManagementConfig {
                 deploy_amount_sol: 0.5,

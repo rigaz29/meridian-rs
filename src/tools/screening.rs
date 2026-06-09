@@ -7,6 +7,9 @@ use reqwest::Client;
 
 const POOL_DISCOVERY_BASE: &str = "https://pool-discovery-api.datapi.meteora.ag";
 const MIN_VOLATILITY_TIMEFRAME: &str = "30m";
+const PVP_MIN_ACTIVE_TVL: f64 = 5_000.0;
+const PVP_MIN_HOLDERS: u64 = 500;
+const PVP_MIN_GLOBAL_FEES_SOL: f64 = 30.0;
 
 static TIMEFRAME_MINUTES: &[(&str, u32)] = &[
     ("5m", 5),
@@ -335,6 +338,15 @@ impl Screener {
                 .get("discord_signal")
                 .and_then(|value| value.as_bool())
                 .filter(|value| *value),
+            is_pvp: None,
+            pvp_risk: None,
+            pvp_symbol: None,
+            pvp_rival_name: None,
+            pvp_rival_mint: None,
+            pvp_rival_pool: None,
+            pvp_rival_tvl: None,
+            pvp_rival_holders: None,
+            pvp_rival_fees: None,
         }
     }
 
@@ -367,8 +379,79 @@ impl Screener {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         filtered.truncate(limit);
+        apply_pvp_risk_policy(&mut filtered, s);
         Ok(filtered)
     }
+}
+
+pub fn apply_pvp_risk_policy(candidates: &mut Vec<CondensedPool>, s: &ScreeningConfig) {
+    if !s.avoid_pvp_symbols || candidates.is_empty() {
+        return;
+    }
+
+    enrich_pvp_risk_from_candidate_set(candidates);
+
+    if s.block_pvp_symbols {
+        let before = candidates.len();
+        candidates.retain(|candidate| candidate.is_pvp != Some(true));
+        let removed = before.saturating_sub(candidates.len());
+        if removed > 0 {
+            info(
+                "screening",
+                &format!("PVP hard filter removed {removed} pool(s)"),
+            );
+        }
+    }
+}
+
+fn enrich_pvp_risk_from_candidate_set(candidates: &mut [CondensedPool]) {
+    let snapshot = candidates.to_vec();
+
+    for candidate in candidates.iter_mut() {
+        let symbol = normalize_symbol(&candidate.base.symbol);
+        if symbol.is_empty() || candidate.base.mint.is_empty() {
+            continue;
+        }
+
+        let rival = snapshot
+            .iter()
+            .filter(|rival| rival.pool_address != candidate.pool_address)
+            .filter(|rival| rival.base.mint != candidate.base.mint)
+            .filter(|rival| normalize_symbol(&rival.base.symbol) == symbol)
+            .filter(|rival| is_meaningful_pvp_rival(rival))
+            .max_by(|a, b| {
+                a.score
+                    .partial_cmp(&b.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        a.tvl
+                            .partial_cmp(&b.tvl)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            });
+
+        if let Some(rival) = rival {
+            candidate.is_pvp = Some(true);
+            candidate.pvp_risk = Some("high".to_string());
+            candidate.pvp_symbol = Some(symbol);
+            candidate.pvp_rival_name = Some(rival.name.clone());
+            candidate.pvp_rival_mint = Some(rival.base.mint.clone());
+            candidate.pvp_rival_pool = Some(rival.pool_address.clone());
+            candidate.pvp_rival_tvl = Some(rival.tvl.round());
+            candidate.pvp_rival_holders = Some(rival.holders);
+            candidate.pvp_rival_fees = Some((rival.fees_sol * 100.0).round() / 100.0);
+        }
+    }
+}
+
+fn is_meaningful_pvp_rival(pool: &CondensedPool) -> bool {
+    pool.tvl >= PVP_MIN_ACTIVE_TVL
+        && pool.holders >= PVP_MIN_HOLDERS
+        && pool.fees_sol >= PVP_MIN_GLOBAL_FEES_SOL
+}
+
+fn normalize_symbol(symbol: &str) -> String {
+    symbol.trim().to_uppercase()
 }
 
 fn score_candidate(pool: &RawPool) -> f64 {
@@ -393,5 +476,129 @@ fn get_volatility_timeframe(source: &str) -> &str {
     match source_min {
         Some(m) if m >= min_30m => source,
         _ => MIN_VOLATILITY_TIMEFRAME,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::pool::PoolToken;
+
+    fn candidate(
+        pool_address: &str,
+        mint: &str,
+        symbol: &str,
+        score: f64,
+        tvl: f64,
+        holders: u64,
+        fees_sol: f64,
+    ) -> CondensedPool {
+        CondensedPool {
+            name: format!("{symbol}/SOL"),
+            pool_address: pool_address.to_string(),
+            base: PoolToken {
+                mint: mint.to_string(),
+                symbol: symbol.to_string(),
+                organic: 75.0,
+                mcap: Some(500_000.0),
+            },
+            quote_organic: 80.0,
+            tvl,
+            volume: 10_000.0,
+            fee_active_tvl_ratio: 0.12,
+            volatility: 0.5,
+            bin_step: 100,
+            score,
+            holders,
+            mcap: 500_000.0,
+            fees_sol,
+            launchpad: Some("meteora".to_string()),
+            dev: None,
+            bundlers_pct: None,
+            top10_pct: None,
+            discord_signal: None,
+            is_pvp: None,
+            pvp_risk: None,
+            pvp_symbol: None,
+            pvp_rival_name: None,
+            pvp_rival_mint: None,
+            pvp_rival_pool: None,
+            pvp_rival_tvl: None,
+            pvp_rival_holders: None,
+            pvp_rival_fees: None,
+        }
+    }
+
+    #[test]
+    fn pvp_policy_marks_exact_symbol_rivals_with_high_risk_metadata() {
+        let mut screening = crate::config::types::Config::default().screening;
+        screening.avoid_pvp_symbols = true;
+        screening.block_pvp_symbols = false;
+        let mut candidates = vec![
+            candidate("PoolAlpha", "MintAlpha", "MOON", 500.0, 20_000.0, 900, 41.0),
+            candidate("PoolBeta", "MintBeta", "MOON", 450.0, 15_000.0, 800, 35.0),
+            candidate(
+                "PoolGamma",
+                "MintGamma",
+                "MOONSHOT",
+                900.0,
+                30_000.0,
+                1_200,
+                50.0,
+            ),
+        ];
+
+        apply_pvp_risk_policy(&mut candidates, &screening);
+
+        let alpha = candidates
+            .iter()
+            .find(|pool| pool.pool_address == "PoolAlpha")
+            .unwrap();
+        assert_eq!(alpha.is_pvp, Some(true));
+        assert_eq!(alpha.pvp_risk.as_deref(), Some("high"));
+        assert_eq!(alpha.pvp_symbol.as_deref(), Some("MOON"));
+        assert_eq!(alpha.pvp_rival_mint.as_deref(), Some("MintBeta"));
+        assert_eq!(alpha.pvp_rival_pool.as_deref(), Some("PoolBeta"));
+        assert_eq!(alpha.pvp_rival_holders, Some(800));
+        assert_eq!(alpha.pvp_rival_fees, Some(35.0));
+
+        let gamma = candidates
+            .iter()
+            .find(|pool| pool.pool_address == "PoolGamma")
+            .unwrap();
+        assert_eq!(gamma.is_pvp, None);
+    }
+
+    #[test]
+    fn pvp_policy_hard_blocks_flagged_candidates_when_configured() {
+        let mut screening = crate::config::types::Config::default().screening;
+        screening.avoid_pvp_symbols = true;
+        screening.block_pvp_symbols = true;
+        let mut candidates = vec![
+            candidate("PoolAlpha", "MintAlpha", "MOON", 500.0, 20_000.0, 900, 41.0),
+            candidate("PoolBeta", "MintBeta", "MOON", 450.0, 15_000.0, 800, 35.0),
+            candidate("PoolSafe", "MintSafe", "SAFE", 300.0, 12_000.0, 650, 34.0),
+        ];
+
+        apply_pvp_risk_policy(&mut candidates, &screening);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].pool_address, "PoolSafe");
+    }
+
+    #[test]
+    fn pvp_metadata_serializes_for_llm_candidate_context() {
+        let mut pool = candidate("PoolAlpha", "MintAlpha", "MOON", 500.0, 20_000.0, 900, 41.0);
+        pool.is_pvp = Some(true);
+        pool.pvp_risk = Some("high".to_string());
+        pool.pvp_rival_name = Some("Moon Rival".to_string());
+        pool.pvp_rival_mint = Some("MintBeta".to_string());
+
+        let json = serde_json::to_value(pool).expect("candidate serializes");
+
+        assert_eq!(json["is_pvp"], true);
+        assert_eq!(json["pvp_risk"], "high");
+        assert_eq!(json["pvp_rival_name"], "Moon Rival");
+        assert_eq!(json["pvp_rival_mint"], "MintBeta");
     }
 }

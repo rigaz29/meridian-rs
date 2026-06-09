@@ -74,7 +74,7 @@ Reference target: [`yunus-0x/meridian`](https://github.com/yunus-0x/meridian)
 ### Phase 5 — Screening enrichment parity
 
 - [x] Discord signal queue and pre-check pipeline
-- [ ] PVP/rival-pool risk detection
+- [x] PVP/rival-pool risk detection
 - [ ] Launchpad allow/block filters
 - [ ] Timeframe-scaled screening thresholds
 - [ ] Chart indicator presets for entry/exit confirmation
@@ -158,6 +158,8 @@ The Rust port accepts both the nested Rust config format and the original Node.j
 Agent Meridian / LPAgent mutable relay execution is documented as replaced by native Rust execution for deploy/claim/close/swap paths; read-only LPAgent analytics remain available for top-LPer study. See [`docs/agent-meridian-relay.md`](docs/agent-meridian-relay.md).
 
 Discord signal queue/pre-check parity is Rust-native and data-dir isolated through `discord-signals.json`; see [`docs/discord-signals.md`](docs/discord-signals.md).
+
+PVP/rival-pool risk detection flags exact-symbol mint conflicts in screening candidates, and can optionally hard-block them with `screening.blockPvpSymbols`; see [`docs/pvp-risk.md`](docs/pvp-risk.md).
 
 **Never commit your real `user-config.json` or API keys.**
 

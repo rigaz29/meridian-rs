@@ -167,6 +167,16 @@ fn config_from_flat_js_value(value: &Value) -> Config {
         "discordSignalMode",
         &mut config.screening.discord_signal_mode,
     );
+    set_bool(
+        obj,
+        "avoidPvpSymbols",
+        &mut config.screening.avoid_pvp_symbols,
+    );
+    set_bool(
+        obj,
+        "blockPvpSymbols",
+        &mut config.screening.block_pvp_symbols,
+    );
 
     set_f64(
         obj,
@@ -708,6 +718,8 @@ mod tests {
           "allowedLaunchpads": ["meteora"],
           "useDiscordSignals": true,
           "discordSignalMode": "only",
+          "avoidPvpSymbols": false,
+          "blockPvpSymbols": true,
           "minClaimAmount": 5,
           "outOfRangeBinsToClose": 10,
           "outOfRangeWaitMinutes": 30,
@@ -768,6 +780,8 @@ mod tests {
             config.screening.discord_signal_mode.as_deref(),
             Some("only")
         );
+        assert!(!config.screening.avoid_pvp_symbols);
+        assert!(config.screening.block_pvp_symbols);
         assert_eq!(config.strategy.min_bins_below, 35);
         assert_eq!(config.strategy.max_bins_below, 69);
         assert_eq!(config.llm.management_model, "minimax/minimax-m2.5");
