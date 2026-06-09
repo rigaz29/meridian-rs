@@ -84,174 +84,367 @@ async fn main_page() -> Html<&'static str> {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Meridian HyperOS</title>
-  <script src="https://cdn.tailwindcss.com"></script>
   <style>
-    :root { color-scheme: dark; }
+    :root {
+      color-scheme: dark;
+      --bg: #050816;
+      --panel: rgba(12, 18, 32, .78);
+      --panel-strong: rgba(15, 23, 42, .92);
+      --line: rgba(148, 163, 184, .18);
+      --muted: #94a3b8;
+      --text: #e5edf7;
+      --cyan: #38bdf8;
+      --emerald: #34d399;
+      --violet: #a78bfa;
+      --amber: #fbbf24;
+      --rose: #fb7185;
+      --orange: #fb923c;
+    }
+    * { box-sizing: border-box; }
     body {
       margin: 0;
       min-height: 100vh;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif;
       background:
-        radial-gradient(circle at 18% 14%, rgba(16,185,129,.28), transparent 34%),
-        radial-gradient(circle at 76% 18%, rgba(56,189,248,.24), transparent 32%),
-        radial-gradient(circle at 46% 88%, rgba(168,85,247,.18), transparent 35%),
-        #020617;
-      color: #e5e7eb;
+        radial-gradient(circle at 15% 12%, rgba(34,211,238,.22), transparent 30%),
+        radial-gradient(circle at 86% 14%, rgba(167,139,250,.18), transparent 30%),
+        radial-gradient(circle at 55% 92%, rgba(16,185,129,.16), transparent 34%),
+        linear-gradient(135deg, #020617, #07111f 48%, #07031a);
+      color: var(--text);
       overflow-x: hidden;
     }
-    .glass { background: rgba(15, 23, 42, .68); border: 1px solid rgba(148, 163, 184, .22); box-shadow: 0 24px 80px rgba(0,0,0,.35); backdrop-filter: blur(18px); }
-    .dock { background: rgba(2, 6, 23, .78); border: 1px solid rgba(148, 163, 184, .2); backdrop-filter: blur(22px); }
-    .app { min-height: 260px; }
-    .mono { font-family: "JetBrains Mono", "SF Mono", ui-monospace, monospace; }
-    button { transition: transform .15s ease, background .15s ease, border-color .15s ease; }
-    button:hover { transform: translateY(-1px); }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image: linear-gradient(rgba(148,163,184,.05) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,.05) 1px, transparent 1px);
+      background-size: 44px 44px;
+      mask-image: linear-gradient(to bottom, black, transparent 88%);
+    }
+    main { width: min(1760px, calc(100vw - 48px)); margin: 0 auto; padding: 32px 0 48px; position: relative; z-index: 1; }
+    .hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px; align-items: end; margin-bottom: 24px; }
+    .eyebrow { color: var(--emerald); letter-spacing: .34em; text-transform: uppercase; font: 700 11px/1.2 "SF Mono", ui-monospace, monospace; }
+    h1 { margin: 8px 0 8px; font-size: clamp(42px, 7vw, 86px); line-height: .92; letter-spacing: -.07em; }
+    .subtitle { max-width: 780px; color: #cbd5e1; font-size: 17px; line-height: 1.65; margin: 0; }
+    .toolbar { display: grid; grid-template-columns: repeat(5, minmax(104px, 1fr)); gap: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 28px; background: rgba(2,6,23,.62); backdrop-filter: blur(18px); box-shadow: 0 24px 70px rgba(0,0,0,.3); }
+    button, select, input { font: inherit; }
+    button { border: 1px solid var(--line); color: var(--text); background: rgba(15,23,42,.82); border-radius: 18px; padding: 12px 16px; cursor: pointer; transition: transform .15s ease, border-color .15s ease, background .15s ease; }
+    button:hover { transform: translateY(-1px); border-color: rgba(56,189,248,.55); background: rgba(30,41,59,.88); }
+    button:disabled { opacity: .55; cursor: wait; transform: none; }
+    .btn-emerald { border-color: rgba(52,211,153,.35); background: rgba(6,78,59,.32); }
+    .btn-cyan { border-color: rgba(56,189,248,.35); background: rgba(8,47,73,.36); }
+    .btn-violet { border-color: rgba(167,139,250,.35); background: rgba(76,29,149,.30); }
+    .btn-amber { border-color: rgba(251,191,36,.35); background: rgba(120,53,15,.28); }
+    .btn-rose { border-color: rgba(251,113,133,.35); background: rgba(136,19,55,.28); }
+    .overview { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
+    .metric { border: 1px solid var(--line); border-radius: 26px; padding: 18px; background: rgba(15,23,42,.56); box-shadow: inset 0 1px rgba(255,255,255,.04); }
+    .metric span { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .18em; }
+    .metric strong { display: block; margin-top: 8px; font-size: 28px; letter-spacing: -.04em; }
+    .grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 18px; }
+    .panel { grid-column: span 3; min-height: 260px; border: 1px solid var(--line); border-radius: 30px; background: var(--panel); box-shadow: 0 24px 90px rgba(0,0,0,.26), inset 0 1px rgba(255,255,255,.05); backdrop-filter: blur(18px); overflow: hidden; }
+    .panel.wide { grid-column: span 8; }
+    .panel.medium { grid-column: span 4; }
+    .panel.tall .panel-body { max-height: 560px; }
+    .panel-header { padding: 18px 20px 12px; border-bottom: 1px solid rgba(148,163,184,.10); }
+    .panel-header .label { font: 800 11px/1.2 "SF Mono", ui-monospace, monospace; letter-spacing: .24em; text-transform: uppercase; color: var(--cyan); }
+    .panel-header h2 { margin: 7px 0 0; font-size: 24px; line-height: 1.1; letter-spacing: -.04em; }
+    .panel-body { padding: 18px 20px 22px; max-height: 380px; overflow: auto; color: #dbeafe; }
+    .panel-body::-webkit-scrollbar { width: 9px; height: 9px; }
+    .panel-body::-webkit-scrollbar-thumb { background: rgba(148,163,184,.26); border-radius: 999px; }
+    .kv { display: grid; grid-template-columns: minmax(110px, .8fr) minmax(0, 1.2fr); gap: 10px; padding: 10px 0; border-bottom: 1px solid rgba(148,163,184,.08); }
+    .kv:last-child { border-bottom: 0; }
+    .kv span { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .12em; }
+    .kv strong { min-width: 0; overflow-wrap: anywhere; }
+    .pill { display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; border-radius: 999px; border: 1px solid var(--line); color: #dbeafe; background: rgba(15,23,42,.75); font: 700 12px/1 "SF Mono", ui-monospace, monospace; }
+    .pill.ok { color: #bbf7d0; border-color: rgba(52,211,153,.35); background: rgba(6,78,59,.26); }
+    .pill.warn { color: #fde68a; border-color: rgba(251,191,36,.35); background: rgba(120,53,15,.24); }
+    .pill.bad { color: #fecdd3; border-color: rgba(251,113,133,.35); background: rgba(136,19,55,.24); }
+    .list { display: grid; gap: 10px; }
+    .item { border: 1px solid rgba(148,163,184,.12); border-radius: 18px; padding: 12px; background: rgba(2,6,23,.35); }
+    .item-title { display: flex; justify-content: space-between; gap: 10px; font-weight: 800; }
+    .item-sub { color: var(--muted); margin-top: 6px; font-size: 13px; overflow-wrap: anywhere; }
+    .empty { color: var(--muted); border: 1px dashed rgba(148,163,184,.22); border-radius: 18px; padding: 18px; background: rgba(15,23,42,.34); }
+    .form-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+    .field label { display: block; color: var(--muted); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; margin-bottom: 7px; }
+    input, select { width: 100%; color: var(--text); background: rgba(2,6,23,.68); border: 1px solid rgba(148,163,184,.22); border-radius: 16px; padding: 12px 13px; outline: none; }
+    input:focus, select:focus { border-color: rgba(56,189,248,.65); box-shadow: 0 0 0 3px rgba(56,189,248,.12); }
+    .result, .log { margin-top: 14px; padding: 14px; border-radius: 18px; background: rgba(2,6,23,.44); border: 1px solid rgba(148,163,184,.10); font: 12px/1.55 "SF Mono", ui-monospace, monospace; white-space: pre-wrap; overflow: auto; max-height: 240px; }
+    .log-line { padding: 5px 0; border-bottom: 1px solid rgba(148,163,184,.07); }
+    .muted { color: var(--muted); }
+    .accent-emerald { color: var(--emerald) !important; } .accent-violet { color: var(--violet) !important; } .accent-amber { color: var(--amber) !important; } .accent-rose { color: var(--rose) !important; } .accent-orange { color: var(--orange) !important; }
+    @media (max-width: 1180px) { .hero { grid-template-columns: 1fr; } .toolbar, .overview { grid-template-columns: repeat(2, minmax(0, 1fr)); } .panel, .panel.medium, .panel.wide { grid-column: span 6; } }
+    @media (max-width: 760px) { main { width: min(100vw - 24px, 1760px); padding-top: 18px; } .toolbar, .overview, .form-grid { grid-template-columns: 1fr; } .grid { grid-template-columns: 1fr; } .panel, .panel.medium, .panel.wide { grid-column: span 1; } }
   </style>
 </head>
 <body>
-  <main class="p-6 lg:p-8 max-w-[1800px] mx-auto">
-    <header class="flex flex-col xl:flex-row xl:items-end xl:justify-between gap-4 mb-8">
+  <main>
+    <header class="hero">
       <section>
-        <p class="text-emerald-300 tracking-[0.35em] text-xs uppercase mono">Local DLMM control surface</p>
-        <h1 class="text-5xl lg:text-7xl font-black tracking-tight mt-2">Meridian HyperOS</h1>
-        <p class="text-slate-300 mt-3 max-w-3xl">Rust-native replacement for Telegram controls: live state, candidate radar, cycle logs, manual actions, config editing, lessons, performance, and blacklist management.</p>
+        <div class="eyebrow">Local DLMM control surface</div>
+        <h1>Meridian HyperOS</h1>
+        <p class="subtitle">Operator-ready dashboard for live state, candidate radar, guarded controls, config patches, lessons, performance, and readable execution logs.</p>
       </section>
-      <nav class="dock rounded-3xl p-2 grid grid-cols-2 sm:grid-cols-5 gap-2 text-sm">
-        <button onclick="refreshAll()" class="px-4 py-3 rounded-2xl bg-emerald-500/20 border border-emerald-400/30">Refresh</button>
-        <button onclick="runControl('screen')" class="px-4 py-3 rounded-2xl bg-cyan-500/20 border border-cyan-400/30">Run Screen</button>
-        <button onclick="runControl('manage')" class="px-4 py-3 rounded-2xl bg-violet-500/20 border border-violet-400/30">Run Manage</button>
-        <button onclick="openConfigPatch()" class="px-4 py-3 rounded-2xl bg-amber-500/20 border border-amber-400/30">Config Patch</button>
-        <button onclick="clearLog()" class="px-4 py-3 rounded-2xl bg-slate-500/20 border border-slate-400/30">Clear Log</button>
+      <nav class="toolbar" aria-label="Quick actions">
+        <button id="refresh-btn" class="btn-emerald" onclick="refreshAll()">Refresh</button>
+        <button class="btn-cyan" onclick="runControl('screen')">Run Screen</button>
+        <button class="btn-violet" onclick="runControl('manage')">Run Manage</button>
+        <button class="btn-amber" onclick="openConfigPatch()">Config Patch</button>
+        <button onclick="clearLog()">Clear Log</button>
       </nav>
     </header>
 
-    <section class="grid grid-cols-1 xl:grid-cols-4 gap-5 mb-5">
-      <div class="glass rounded-[2rem] p-5 app" data-app="dashboard">
-        <div class="text-xs mono text-emerald-300 uppercase tracking-[.22em]">Dashboard</div>
-        <h2 class="text-2xl font-bold mt-2">Runtime Status</h2>
-        <pre id="status" class="mono text-xs whitespace-pre-wrap text-slate-300 mt-4">Loading...</pre>
-      </div>
-      <div class="glass rounded-[2rem] p-5 app" data-app="positions">
-        <div class="text-xs mono text-cyan-300 uppercase tracking-[.22em]">Live Positions</div>
-        <h2 class="text-2xl font-bold mt-2">Positions</h2>
-        <div id="positions" class="space-y-3 mt-4 text-sm text-slate-300">Loading...</div>
-      </div>
-      <div class="glass rounded-[2rem] p-5 app" data-app="candidates">
-        <div class="text-xs mono text-fuchsia-300 uppercase tracking-[.22em]">Candidate Radar</div>
-        <h2 class="text-2xl font-bold mt-2">Candidates</h2>
-        <div id="candidates" class="space-y-3 mt-4 text-sm text-slate-300">Click refresh to scan.</div>
-      </div>
-      <div class="glass rounded-[2rem] p-5 app" data-app="balance">
-        <div class="text-xs mono text-amber-300 uppercase tracking-[.22em]">Wallet</div>
-        <h2 class="text-2xl font-bold mt-2">Balances</h2>
-        <input id="wallet" placeholder="Wallet address" class="mt-4 w-full bg-slate-950/70 border border-slate-700 rounded-2xl px-3 py-2 text-sm outline-none">
-        <button onclick="loadBalance()" class="mt-3 w-full rounded-2xl bg-amber-500/20 border border-amber-400/30 py-2">Load Balance</button>
-        <pre id="balance" class="mono text-xs whitespace-pre-wrap text-slate-300 mt-3">Wallet required.</pre>
-      </div>
+    <section class="overview" aria-label="Runtime summary">
+      <div class="metric"><span>Runtime</span><strong id="metric-runtime">Loading</strong></div>
+      <div class="metric"><span>Mode</span><strong id="metric-mode">—</strong></div>
+      <div class="metric"><span>Positions</span><strong id="metric-positions">0</strong></div>
+      <div class="metric"><span>Candidates</span><strong id="metric-candidates">0</strong></div>
     </section>
 
-    <section class="grid grid-cols-1 xl:grid-cols-3 gap-5 mb-5">
-      <div class="glass rounded-[2rem] p-5 app xl:col-span-2" data-app="controls">
-        <div class="text-xs mono text-rose-300 uppercase tracking-[.22em]">Manual Controls</div>
-        <h2 class="text-2xl font-bold mt-2">Deploy / Claim / Close / Swap / Cycle Controls</h2>
-        <p class="text-slate-400 text-sm mt-2">Actions are sent to <span class="mono">/api/control</span> and respect Rust config dry-run guardrails.</p>
-        <div class="grid md:grid-cols-4 gap-3 mt-4">
-          <input id="control-action" value="deploy_position" class="bg-slate-950/70 border border-slate-700 rounded-2xl px-3 py-2 text-sm" placeholder="action">
-          <input id="control-pool" class="bg-slate-950/70 border border-slate-700 rounded-2xl px-3 py-2 text-sm" placeholder="pool">
-          <input id="control-position" class="bg-slate-950/70 border border-slate-700 rounded-2xl px-3 py-2 text-sm" placeholder="position_id">
-          <input id="control-amount" class="bg-slate-950/70 border border-slate-700 rounded-2xl px-3 py-2 text-sm" placeholder="amount_sol">
+    <section class="grid">
+      <article class="panel medium" data-panel="dashboard">
+        <header class="panel-header"><div class="label accent-emerald">Dashboard</div><h2>Runtime Status</h2></header>
+        <div id="status" class="panel-body">Loading runtime state…</div>
+      </article>
+
+      <article class="panel medium" data-panel="positions">
+        <header class="panel-header"><div class="label">Live Positions</div><h2>Positions</h2></header>
+        <div id="positions" class="panel-body">Loading positions…</div>
+      </article>
+
+      <article class="panel medium" data-panel="candidates">
+        <header class="panel-header"><div class="label accent-violet">Candidate Radar</div><h2>Candidates</h2></header>
+        <div id="candidates" class="panel-body">Loading candidates…</div>
+      </article>
+
+      <article class="panel medium" data-panel="balance">
+        <header class="panel-header"><div class="label accent-amber">Wallet</div><h2>Balances</h2></header>
+        <div class="panel-body">
+          <div class="field"><label for="wallet">Wallet address</label><input id="wallet" placeholder="Paste wallet address"></div>
+          <button class="btn-amber" style="width:100%;margin-top:12px" onclick="loadBalance()">Load Balance</button>
+          <div id="balance" class="result">Wallet required.</div>
         </div>
-        <button onclick="runManualControl()" class="mt-3 px-4 py-2 rounded-2xl bg-rose-500/20 border border-rose-400/30">Execute Manual Control</button>
-        <pre id="control-result" class="mono text-xs whitespace-pre-wrap mt-4 text-slate-300">No action yet.</pre>
-      </div>
-      <div class="glass rounded-[2rem] p-5 app" data-app="cycle-log">
-        <div class="text-xs mono text-lime-300 uppercase tracking-[.22em]">Cycle Logs</div>
-        <h2 class="text-2xl font-bold mt-2">Control Log</h2>
-        <div id="cycle-log" class="mono text-xs h-[260px] overflow-auto text-slate-300 mt-4">Booting HyperOS...</div>
-      </div>
-    </section>
+      </article>
 
-    <section class="grid grid-cols-1 xl:grid-cols-4 gap-5">
-      <div class="glass rounded-[2rem] p-5 app" data-app="decisions">
-        <div class="text-xs mono text-sky-300 uppercase tracking-[.22em]">Recent Decisions</div>
-        <h2 class="text-2xl font-bold mt-2">Decision Log</h2>
-        <pre id="decisions" class="mono text-xs whitespace-pre-wrap text-slate-300 mt-4">Loading...</pre>
-      </div>
-      <div class="glass rounded-[2rem] p-5 app" data-app="config">
-        <div class="text-xs mono text-orange-300 uppercase tracking-[.22em]">Config Editor</div>
-        <h2 class="text-2xl font-bold mt-2">Patch Config</h2>
-        <input id="config-path" value="management.deployAmountSol" class="mt-4 w-full bg-slate-950/70 border border-slate-700 rounded-2xl px-3 py-2 text-sm">
-        <input id="config-value" value="0.1" class="mt-3 w-full bg-slate-950/70 border border-slate-700 rounded-2xl px-3 py-2 text-sm">
-        <button onclick="patchConfig()" class="mt-3 w-full rounded-2xl bg-orange-500/20 border border-orange-400/30 py-2">Save Patch</button>
-        <pre id="config" class="mono text-xs whitespace-pre-wrap text-slate-300 mt-3">Loading...</pre>
-      </div>
-      <div class="glass rounded-[2rem] p-5 app" data-app="lessons">
-        <div class="text-xs mono text-purple-300 uppercase tracking-[.22em]">Lessons</div>
-        <h2 class="text-2xl font-bold mt-2">Lessons & Performance</h2>
-        <pre id="lessons" class="mono text-xs whitespace-pre-wrap text-slate-300 mt-4">Loading...</pre>
-        <pre id="performance" class="mono text-xs whitespace-pre-wrap text-slate-300 mt-4">Loading...</pre>
-      </div>
-      <div class="glass rounded-[2rem] p-5 app" data-app="blacklist">
-        <div class="text-xs mono text-red-300 uppercase tracking-[.22em]">Blacklist</div>
-        <h2 class="text-2xl font-bold mt-2">Token / Dev Blocks</h2>
-        <pre id="blacklist" class="mono text-xs whitespace-pre-wrap text-slate-300 mt-4">Loading...</pre>
-      </div>
+      <article class="panel wide" data-panel="controls">
+        <header class="panel-header"><div class="label accent-rose">Manual Controls</div><h2>Deploy / Claim / Close / Swap / Cycle Controls</h2></header>
+        <div class="panel-body">
+          <p class="muted">Actions are sent to <span class="pill">/api/control</span> and stay behind Rust dry-run guardrails unless config explicitly allows live execution.</p>
+          <div class="form-grid">
+            <div class="field"><label for="control-action">Action</label><select id="control-action"><option>deploy_position</option><option>claim_fees</option><option>close_position</option><option>swap_token</option><option>screen</option><option>manage</option></select></div>
+            <div class="field"><label for="control-pool">Pool</label><input id="control-pool" placeholder="pool"></div>
+            <div class="field"><label for="control-position">Position</label><input id="control-position" placeholder="position_id"></div>
+            <div class="field"><label for="control-amount">Amount SOL</label><input id="control-amount" placeholder="0.10" inputmode="decimal"></div>
+          </div>
+          <button class="btn-rose" style="margin-top:12px" onclick="runManualControl()">Execute Manual Control</button>
+          <div id="control-result" class="result">No action yet.</div>
+        </div>
+      </article>
+
+      <article class="panel medium" data-panel="cycle-log">
+        <header class="panel-header"><div class="label accent-emerald">Cycle Logs</div><h2>Control Log</h2></header>
+        <div id="cycle-log" class="panel-body log"><div class="log-line">Booting HyperOS…</div></div>
+      </article>
+
+      <article class="panel medium" data-panel="decisions">
+        <header class="panel-header"><div class="label">Recent Decisions</div><h2>Decision Log</h2></header>
+        <div id="decisions" class="panel-body">Loading decisions…</div>
+      </article>
+
+      <article class="panel medium tall" data-panel="config">
+        <header class="panel-header"><div class="label accent-orange">Config Editor</div><h2>Patch Config</h2></header>
+        <div class="panel-body">
+          <div class="field"><label for="config-path">Config path</label><input id="config-path" value="management.deployAmountSol"></div>
+          <div class="field" style="margin-top:10px"><label for="config-value">New value</label><input id="config-value" value="0.1"></div>
+          <button class="btn-amber" style="width:100%;margin-top:12px" onclick="patchConfig()">Save Patch</button>
+          <div id="config" class="result">Loading config summary…</div>
+        </div>
+      </article>
+
+      <article class="panel medium" data-panel="lessons">
+        <header class="panel-header"><div class="label accent-violet">Lessons</div><h2>Lessons & Performance</h2></header>
+        <div id="lessons" class="panel-body">Loading lessons…</div>
+        <div id="performance" class="panel-body" style="border-top:1px solid rgba(148,163,184,.10)">Loading performance…</div>
+      </article>
+
+      <article class="panel medium" data-panel="blacklist">
+        <header class="panel-header"><div class="label accent-rose">Blacklist</div><h2>Token / Dev Blocks</h2></header>
+        <div id="blacklist" class="panel-body">Loading blacklist…</div>
+      </article>
     </section>
   </main>
 
 <script>
+const $ = (id) => document.getElementById(id);
 const pretty = (v) => JSON.stringify(v, null, 2);
-const log = (msg) => { const el = document.getElementById('cycle-log'); el.innerHTML += `<div>${new Date().toLocaleTimeString()} ${msg}</div>`; el.scrollTop = el.scrollHeight; };
-async function api(path, options={}) { const res = await fetch(path, options); return await res.json(); }
-async function refreshAll() {
-  log('refreshing live state');
-  const [status, positions, decisions, config, lessons, performance, blacklist] = await Promise.all([
-    api('/api/status'), api('/api/positions'), api('/api/decisions'), api('/api/config'), api('/api/lessons'), api('/api/performance'), api('/api/blacklist')
-  ]);
-  document.getElementById('status').textContent = pretty(status);
-  document.getElementById('positions').textContent = pretty(positions);
-  document.getElementById('decisions').textContent = pretty(decisions);
-  document.getElementById('config').textContent = pretty(config.data || config);
-  document.getElementById('lessons').textContent = pretty(lessons);
-  document.getElementById('performance').textContent = pretty(performance);
-  document.getElementById('blacklist').textContent = pretty(blacklist);
+const esc = (v) => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+const short = (v, n=64) => { const s = String(v ?? '—'); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+const pill = (text, tone='') => `<span class="pill ${tone}">${esc(text)}</span>`;
+const kv = (key, value) => `<div class="kv"><span>${esc(key)}</span><strong>${esc(value ?? '—')}</strong></div>`;
+const empty = (text) => `<div class="empty">${esc(text)}</div>`;
+function setPanel(id, html) { $(id).innerHTML = html; }
+function log(msg, tone='') {
+  const el = $('cycle-log');
+  const color = tone === 'bad' ? ' style="color:#fecdd3"' : tone === 'ok' ? ' style="color:#bbf7d0"' : '';
+  el.insertAdjacentHTML('beforeend', `<div class="log-line"${color}>${new Date().toLocaleTimeString()} ${esc(msg)}</div>`);
+  el.scrollTop = el.scrollHeight;
 }
-async function loadCandidates() {
-  const data = await api('/api/candidates?limit=5');
-  document.getElementById('candidates').textContent = pretty(data);
+async function api(path, options={}) {
+  try {
+    const res = await fetch(path, options);
+    const text = await res.text();
+    let data;
+    try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
+    if (!res.ok) return { success: false, command: path, error: data.error || res.statusText || text };
+    return data;
+  } catch (error) {
+    return { success: false, command: path, error: String(error) };
+  }
+}
+function unwrap(payload) { return payload && payload.data ? payload.data : {}; }
+function renderError(payload) { return `<div class="empty">${esc(payload.error || 'Request failed')}</div>`; }
+function renderStatus(payload) {
+  if (!payload.success) return renderError(payload);
+  const s = unwrap(payload);
+  $('metric-runtime').textContent = s.status || 'running';
+  $('metric-mode').textContent = s.dry_run ? 'DRY RUN' : 'LIVE';
+  $('metric-positions').textContent = s.active_positions ?? 0;
+  const schedule = s.schedule || {};
+  return [
+    kv('Status', s.status || 'running'),
+    kv('Mode', s.dry_run ? 'Dry run guard active' : 'Live execution enabled'),
+    kv('Active positions', s.active_positions ?? 0),
+    kv('Screen every', `${schedule.screeningIntervalMin ?? '—'} min`),
+    kv('Manage every', `${schedule.managementIntervalMin ?? '—'} min`),
+    kv('PnL poll', `${schedule.pnlPollIntervalSecs ?? '—'} sec`),
+    kv('State path', short(s.state_path, 72)),
+  ].join('');
+}
+function renderPositions(payload) {
+  if (!payload.success) return renderError(payload);
+  const data = unwrap(payload);
+  const positions = data.positions || [];
+  if (!positions.length) return empty('No active positions in local state.');
+  return `<div class="list">${positions.map(p => `<div class="item"><div class="item-title"><span>${esc(p.base_symbol || p.id || 'position')}</span>${pill(p.status || 'active', 'ok')}</div><div class="item-sub">${esc(short(p.id || p.position || '', 72))}</div><div class="item-sub">Pool: ${esc(short(p.pool_address || '', 72))}</div><div class="item-sub">Amount: ${esc(p.amount_sol ?? '—')} SOL · Range: ${esc(p.lower_bin ?? '—')} → ${esc(p.upper_bin ?? '—')}</div></div>`).join('')}</div>`;
+}
+function renderCandidates(payload) {
+  if (!payload.success) return renderError(payload);
+  const data = unwrap(payload);
+  const candidates = data.candidates || [];
+  const filtered = data.filtered_examples || [];
+  $('metric-candidates').textContent = candidates.length;
+  if (!candidates.length) {
+    const examples = filtered.slice(0, 3).map(x => `<div class="item"><div class="item-title"><span>${esc(x.name || x.symbol || 'filtered')}</span>${pill('rejected','warn')}</div><div class="item-sub">${esc(x.reason || 'No reason provided')}</div></div>`).join('');
+    return empty(`No deploy candidates. Screened ${data.total_screened ?? 0} pools.`) + (examples ? `<div class="list" style="margin-top:12px">${examples}</div>` : '');
+  }
+  return `<div class="list">${candidates.map(c => `<div class="item"><div class="item-title"><span>${esc(c.name || c.symbol || c.pool_address || 'candidate')}</span>${pill(c.score ?? 'candidate', 'ok')}</div><div class="item-sub">${esc(short(c.pool_address || c.address || '', 72))}</div><div class="item-sub">TVL ${esc(c.tvl ?? '—')} · Fees ${esc(c.fees_sol ?? c.total_fees_sol ?? '—')} SOL</div></div>`).join('')}</div>`;
+}
+function renderDecisions(payload) {
+  if (!payload.success) return renderError(payload);
+  const data = unwrap(payload);
+  const decisions = data.decisions || [];
+  $('metric-decisions') && ($('metric-decisions').textContent = decisions.length);
+  if (!decisions.length) return empty('No decision-log entries yet.');
+  return `<div class="list">${decisions.slice(0, 8).map(d => `<div class="item"><div class="item-title"><span>${esc(d.tool || d.action || 'decision')}</span>${pill(d.success === false ? 'failed' : 'ok', d.success === false ? 'bad' : 'ok')}</div><div class="item-sub">${esc(d.timestamp || '')}</div></div>`).join('')}</div>`;
+}
+function renderConfig(payload) {
+  if (!payload.success) return renderError(payload);
+  const c = unwrap(payload);
+  const management = c.management || {};
+  const risk = c.risk || {};
+  const screening = c.screening || {};
+  return [
+    kv('Dry run', c.dryRun),
+    kv('Deploy amount', `${management.deployAmountSol ?? '—'} SOL`),
+    kv('Max positions', risk.maxPositions ?? '—'),
+    kv('Screening tf', screening.timeframe || '—'),
+    kv('Min TVL', screening.minTvl ?? '—'),
+    kv('Config path', short(payload.path || '', 72)),
+  ].join('');
+}
+function renderLessons(payload) {
+  if (!payload.success) return renderError(payload);
+  const data = unwrap(payload);
+  const lessons = data.lessons || [];
+  if (!lessons.length) return empty('No lessons recorded yet.');
+  return `<div class="list">${lessons.slice(0, 4).map(l => `<div class="item"><div class="item-title"><span>${esc(l.role || 'lesson')}</span>${pill(Number(l.confidence ?? 0).toFixed(2))}</div><div class="item-sub">${esc(short(l.content || l.text || '', 120))}</div></div>`).join('')}</div>`;
+}
+function renderPerformance(payload) {
+  if (!payload.success) return renderError(payload);
+  const h = unwrap(payload).history || {};
+  return [kv('24h records', h.count ?? 0), kv('Total PnL', h.total_pnl_sol ?? 0), kv('Win rate', h.win_rate_pct ?? '—')].join('');
+}
+function renderBlacklist(payload) {
+  if (!payload.success) return renderError(payload);
+  const data = unwrap(payload);
+  const tokens = data.tokens?.blacklist || [];
+  const devs = data.blocked_devs?.blocked_devs || [];
+  if (!tokens.length && !devs.length) return empty('No token or developer blocks.');
+  return [kv('Blocked tokens', tokens.length), kv('Blocked devs', devs.length)].join('');
+}
+function renderBalance(payload) {
+  if (!payload.success) return renderError(payload);
+  const data = unwrap(payload);
+  if (data.available === false) return empty(data.reason || 'Wallet required.');
+  return `<div class="result">${esc(pretty(data))}</div>`;
+}
+async function refreshAll() {
+  const refreshButton = $('refresh-btn');
+  refreshButton.disabled = true;
+  log('refreshing live state');
+  const [status, positions, candidates, decisions, config, lessons, performance, blacklist] = await Promise.all([
+    api('/api/status'), api('/api/positions'), api('/api/candidates?limit=5'), api('/api/decisions'), api('/api/config'), api('/api/lessons'), api('/api/performance'), api('/api/blacklist')
+  ]);
+  setPanel('status', renderStatus(status));
+  setPanel('positions', renderPositions(positions));
+  setPanel('candidates', renderCandidates(candidates));
+  setPanel('decisions', renderDecisions(decisions));
+  setPanel('config', renderConfig(config));
+  setPanel('lessons', renderLessons(lessons));
+  setPanel('performance', renderPerformance(performance));
+  setPanel('blacklist', renderBlacklist(blacklist));
+  log('refresh complete', 'ok');
+  refreshButton.disabled = false;
 }
 async function loadBalance() {
-  const wallet = encodeURIComponent(document.getElementById('wallet').value.trim());
+  const wallet = encodeURIComponent($('wallet').value.trim());
   const data = await api('/api/balance?wallet=' + wallet);
-  document.getElementById('balance').textContent = pretty(data);
+  setPanel('balance', renderBalance(data));
 }
 async function runControl(action) {
   log('control: ' + action);
   const data = await api('/api/control', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ action, wallet_sol: 0 }) });
-  document.getElementById('control-result').textContent = pretty(data);
+  $('control-result').textContent = pretty(data);
+  log(data.success ? `${action} finished` : `${action} failed`, data.success ? 'ok' : 'bad');
   await refreshAll();
 }
 async function runManualControl() {
-  const action = document.getElementById('control-action').value.trim();
-  const pool = document.getElementById('control-pool').value.trim();
-  const position_id = document.getElementById('control-position').value.trim();
-  const amount = Number(document.getElementById('control-amount').value || 0);
+  const action = $('control-action').value.trim();
+  if (action === 'screen' || action === 'manage') return runControl(action);
+  const pool = $('control-pool').value.trim();
+  const position_id = $('control-position').value.trim();
+  const amount = Number($('control-amount').value || 0);
   const args = { pool_address: pool, pool, position_id, amount_sol: amount, dry_run: true, skip_swap: true };
+  log('manual action: ' + action);
   const data = await api('/api/control', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify({ action, args }) });
-  document.getElementById('control-result').textContent = pretty(data);
-  log('manual action finished: ' + action);
+  $('control-result').textContent = pretty(data);
+  log(data.success ? `manual ${action} finished` : `manual ${action} failed`, data.success ? 'ok' : 'bad');
+  await refreshAll();
 }
 async function patchConfig() {
-  let raw = document.getElementById('config-value').value;
+  let raw = $('config-value').value;
   let value; try { value = JSON.parse(raw); } catch { value = raw; }
-  const body = { path: document.getElementById('config-path').value.trim(), value };
+  const body = { path: $('config-path').value.trim(), value };
+  log('patch config: ' + body.path);
   const data = await api('/api/config', { method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body) });
-  document.getElementById('config').textContent = pretty(data);
+  $('config').innerHTML = data.success ? renderConfig({success:true, data:data.data.config, path:data.data.path}) : renderError(data);
+  $('control-result').textContent = pretty(data);
+  log(data.success ? 'config patch saved' : 'config patch failed', data.success ? 'ok' : 'bad');
 }
-function openConfigPatch(){ document.getElementById('config-path').focus(); }
-function clearLog(){ document.getElementById('cycle-log').innerHTML = ''; }
-setInterval(refreshAll, 15000);
+function openConfigPatch(){ $('config-path').focus(); }
+function clearLog(){ $('cycle-log').innerHTML = ''; }
 refreshAll();
-loadCandidates();
+setInterval(refreshAll, 15000);
 </script>
 </body>
 </html>
@@ -687,6 +880,11 @@ mod tests {
         }
         assert!(html.contains("/api/control"));
         assert!(html.contains("/api/config"));
+        assert!(html.contains("renderStatus"));
+        assert!(html.contains("renderCandidates"));
+        assert!(html.contains("Operator-ready dashboard"));
+        assert!(!html.contains("cdn.tailwindcss.com"));
+        assert!(!html.contains("textContent = pretty(status)"));
     }
 
     #[test]
