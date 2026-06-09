@@ -39,3 +39,7 @@ regex = "1"
 urlencoding = "2"
 hyper = { version = "1.10.1", features = ["full"] }
 atty = "0.2.14"
+
+# Fix: five8 v1.0 re-exports five8_core without std feature,
+# causing DecodeError to miss impl std::error::Error
+five8_core = { version = "0.1.2", features = ["std"] }

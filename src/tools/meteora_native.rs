@@ -106,7 +106,25 @@ pub fn wallet_secret_from_env() -> Result<String> {
     ["WALLET_PRIVATE_KEY", "MERIDIAN_WALLET_PRIVATE_KEY"]
         .iter()
         .find_map(|key| std::env::var(key).ok().filter(|value| !value.trim().is_empty()))
-        .ok_or_else(|| anyhow!("WALLET_PRIVATE_KEY or MERIDIAN_WALLET_PRIVATE_KEY is required for native Meteora transactions"))
+        .map(|s| Ok(s))
+        .unwrap_or_else(|| {
+            let path = std::env::var("SOLANA_KEYPAIR")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .map(std::path::PathBuf::from)
+                .or_else(|| {
+                    std::env::var("HOME")
+                        .ok()
+                        .map(std::path::PathBuf::from)
+                        .filter(|p| p.is_dir())
+                        .map(|h| h.join(".config").join("solana").join("id.json"))
+                })
+                .ok_or_else(|| anyhow!(
+                    "WALLET_PRIVATE_KEY or SOLANA_KEYPAIR or ~/.config/solana/id.json is required"
+                ))?;
+            std::fs::read_to_string(&path)
+                .map_err(|e| anyhow!("failed to read Solana CLI keypair at {}: {}", path.display(), e))
+        })
 }
 
 pub fn resolve_rpc_url(config: &Config) -> String {

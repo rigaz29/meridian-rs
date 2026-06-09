@@ -1326,6 +1326,12 @@ mod tests {
             }
             Self { saved }
         }
+
+        fn set(key: &'static str, value: &str) -> Self {
+            let saved = vec![(key, std::env::var(key).ok())];
+            std::env::set_var(key, value);
+            Self { saved }
+        }
     }
 
     impl Drop for EnvGuard {
@@ -1382,7 +1388,8 @@ mod tests {
 
     #[tokio::test]
     async fn claim_live_path_uses_native_meteora_before_js_cli() {
-        let _guard = EnvGuard::clear(&["WALLET_PRIVATE_KEY", "MERIDIAN_WALLET_PRIVATE_KEY"]);
+        let _guard = EnvGuard::clear(&["WALLET_PRIVATE_KEY", "MERIDIAN_WALLET_PRIVATE_KEY", "SOLANA_KEYPAIR"]);
+        let _home = EnvGuard::set("HOME", "/tmp/meridian-test-empty-home");
         let position = "22222222222222222222222222222222";
         let config = Config {
             dry_run: false,
@@ -1408,7 +1415,8 @@ mod tests {
 
     #[tokio::test]
     async fn close_live_path_uses_native_meteora_before_js_cli() {
-        let _guard = EnvGuard::clear(&["WALLET_PRIVATE_KEY", "MERIDIAN_WALLET_PRIVATE_KEY"]);
+        let _guard = EnvGuard::clear(&["WALLET_PRIVATE_KEY", "MERIDIAN_WALLET_PRIVATE_KEY", "SOLANA_KEYPAIR"]);
+        let _home = EnvGuard::set("HOME", "/tmp/meridian-test-empty-home");
         let position = "22222222222222222222222222222222";
         let config = Config {
             dry_run: false,
@@ -1434,7 +1442,8 @@ mod tests {
 
     #[tokio::test]
     async fn deploy_live_path_uses_native_meteora_before_js_cli() {
-        let _guard = EnvGuard::clear(&["WALLET_PRIVATE_KEY", "MERIDIAN_WALLET_PRIVATE_KEY"]);
+        let _guard = EnvGuard::clear(&["WALLET_PRIVATE_KEY", "MERIDIAN_WALLET_PRIVATE_KEY", "SOLANA_KEYPAIR"]);
+        let _home = EnvGuard::set("HOME", "/tmp/meridian-test-empty-home");
         let pool = "22222222222222222222222222222222";
         let config = Config {
             dry_run: false,

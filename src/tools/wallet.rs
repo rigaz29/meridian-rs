@@ -56,9 +56,45 @@ pub fn load_keypair_from_env() -> Result<Keypair> {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
         })
-        .ok_or_else(|| anyhow!("WALLET_PRIVATE_KEY is not set"))?;
+        .map(|s| (s, "env"));
 
-    load_keypair_from_secret(&secret)
+    if let Some((secret, _)) = secret {
+        return load_keypair_from_secret(&secret);
+    }
+
+    // Fall back to Solana CLI keypair path
+    load_keypair_from_solana_cli()
+}
+
+/// Load a keypair from the Solana CLI keypair file.
+///
+/// Resolution order:
+/// 1. `SOLANA_KEYPAIR` env var (explicit file path)
+/// 2. `~/.config/solana/id.json` (default Solana CLI location)
+pub fn load_keypair_from_solana_cli() -> Result<Keypair> {
+    let path = std::env::var("SOLANA_KEYPAIR")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            dirs().map(|h| h.join(".config").join("solana").join("id.json"))
+        })
+        .ok_or_else(|| anyhow!(
+            "cannot resolve Solana CLI keypair: set SOLANA_KEYPAIR or install Solana CLI"
+        ))?;
+
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow!("failed to read Solana CLI keypair at {}: {}", path.display(), e))?;
+
+    load_keypair_from_secret(&content)
+        .map_err(|e| anyhow!("failed to parse Solana CLI keypair at {}: {}", path.display(), e))
+}
+
+fn dirs() -> Option<std::path::PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_dir())
 }
 
 pub fn sign_message(keypair: &Keypair, message: &[u8]) -> Signature {
