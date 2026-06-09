@@ -706,6 +706,8 @@ mod tests {
           "maxTop10Pct": 60,
           "blockedLaunchpads": ["pump.fun"],
           "allowedLaunchpads": ["meteora"],
+          "useDiscordSignals": true,
+          "discordSignalMode": "only",
           "minClaimAmount": 5,
           "outOfRangeBinsToClose": 10,
           "outOfRangeWaitMinutes": 30,
@@ -761,6 +763,11 @@ mod tests {
         assert_eq!(config.screening.min_quote_organic, 60.0);
         assert_eq!(config.screening.blocked_launchpads, vec!["pump.fun"]);
         assert_eq!(config.screening.allowed_launchpads, vec!["meteora"]);
+        assert!(config.screening.use_discord_signals);
+        assert_eq!(
+            config.screening.discord_signal_mode.as_deref(),
+            Some("only")
+        );
         assert_eq!(config.strategy.min_bins_below, 35);
         assert_eq!(config.strategy.max_bins_below, 69);
         assert_eq!(config.llm.management_model, "minimax/minimax-m2.5");

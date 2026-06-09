@@ -11,6 +11,7 @@ use crate::signal_weights::{recalculate_weights, SignalWeightsStore};
 use crate::state::pool_memory::PoolMemoryStore;
 use crate::state::positions::PositionState;
 use crate::tools::blacklist::{BlacklistEntry, BlacklistStore, BlockedDevEntry};
+use crate::tools::discord_signals::{DiscordSignalRecord, DiscordSignalStatus, DiscordSignalStore};
 use crate::tools::dlmm::{
     claim_fees, close_position, deploy_position, get_my_positions, get_position_pnl,
 };
@@ -110,6 +111,20 @@ pub enum BlacklistAction {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum DiscordSignalsAction {
+    List,
+    Clear,
+    Queue {
+        pool: String,
+        base_mint: String,
+        symbol: Option<String>,
+        author: Option<String>,
+        channel: Option<String>,
+        snippet: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum StrategyAction {
     List,
     Show { id: String },
@@ -140,6 +155,9 @@ pub enum CliCommand {
     },
     Blacklist {
         action: BlacklistAction,
+    },
+    DiscordSignals {
+        action: DiscordSignalsAction,
     },
     Strategies {
         action: StrategyAction,
@@ -232,6 +250,7 @@ pub fn help_text() -> String {
         "  meridian evolve",
         "  meridian pool-memory summary|list|show|add-note|cooldown|clear-cooldown ...",
         "  meridian blacklist list|add|remove|dev-list|dev-add|dev-remove ...",
+        "  meridian discord-signals [clear|queue --pool <pool> --base-mint <mint> [--symbol <sym>]]",
         "  meridian strategies [list|show|set-active|remove] [id]",
         "  meridian status",
         "  meridian balance [--wallet <addr>]",
@@ -269,6 +288,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<Option<CliCommand>> {
         "evolve" => Ok(Some(CliCommand::Evolve)),
         "pool-memory" | "pool_memory" => parse_pool_memory_args(tail).map(Some),
         "blacklist" | "blocklist" => parse_blacklist_args(tail).map(Some),
+        "discord-signals" | "discord_signals" => parse_discord_signals_args(tail).map(Some),
         "strategy" | "strategies" => parse_strategy_args(tail).map(Some),
         "status" => Ok(Some(CliCommand::Status)),
         "balance" => Ok(Some(CliCommand::Balance {
@@ -539,6 +559,27 @@ fn parse_blacklist_args(args: &[String]) -> Result<CliCommand> {
     Ok(CliCommand::Blacklist { action })
 }
 
+fn parse_discord_signals_args(args: &[String]) -> Result<CliCommand> {
+    let action_name = args.first().map(String::as_str).unwrap_or("list");
+    let action_args = if args.is_empty() { args } else { &args[1..] };
+    let action = match action_name {
+        "list" => DiscordSignalsAction::List,
+        "clear" => DiscordSignalsAction::Clear,
+        "queue" | "add" => DiscordSignalsAction::Queue {
+            pool: required_flag(action_args, &["--pool", "--pool-address"])?
+                .ok_or_else(|| anyhow!("discord-signals queue requires --pool <pool>"))?,
+            base_mint: required_flag(action_args, &["--base-mint", "--mint"])?
+                .ok_or_else(|| anyhow!("discord-signals queue requires --base-mint <mint>"))?,
+            symbol: optional_flag(action_args, &["--symbol"]),
+            author: optional_flag(action_args, &["--author"]),
+            channel: optional_flag(action_args, &["--channel"]),
+            snippet: optional_flag(action_args, &["--snippet", "--message"]),
+        },
+        other => return Err(anyhow!("unknown discord-signals action '{}'", other)),
+    };
+    Ok(CliCommand::DiscordSignals { action })
+}
+
 fn parse_strategy_args(args: &[String]) -> Result<CliCommand> {
     let action_name = args.first().map(String::as_str).unwrap_or("list");
     let action_args = if args.is_empty() { args } else { &args[1..] };
@@ -601,6 +642,7 @@ pub fn command_name(command: &CliCommand) -> &'static str {
         CliCommand::Evolve => "evolve",
         CliCommand::PoolMemory { .. } => "pool-memory",
         CliCommand::Blacklist { .. } => "blacklist",
+        CliCommand::DiscordSignals { .. } => "discord-signals",
         CliCommand::Strategies { .. } => "strategies",
         CliCommand::Status => "status",
         CliCommand::Balance { .. } => "balance",
@@ -736,6 +778,10 @@ fn token_blacklist_path_for_state(state_path: &str) -> PathBuf {
 
 fn dev_blocklist_path_for_state(state_path: &str) -> PathBuf {
     data_dir_for_state(state_path).join("dev-blocklist.json")
+}
+
+fn discord_signals_path_for_state(state_path: &str) -> PathBuf {
+    data_dir_for_state(state_path).join("discord-signals.json")
 }
 
 fn ensure_parent(path: &Path) -> Result<()> {
@@ -1113,6 +1159,63 @@ fn strategy_library_path_for_state(state_path: &str) -> PathBuf {
     data_dir_for_state(state_path).join("strategy-library.json")
 }
 
+fn run_discord_signals_command(
+    action: DiscordSignalsAction,
+    state_path: &str,
+) -> Result<CliOutput> {
+    let path = discord_signals_path_for_state(state_path);
+    let mut store = DiscordSignalStore::load_at(&path)?;
+    match action {
+        DiscordSignalsAction::List => Ok(json_command_output(
+            "discord-signals",
+            json!(store.summary()),
+        )),
+        DiscordSignalsAction::Clear => {
+            let result = store.clear_processed()?;
+            Ok(json_command_output(
+                "discord-signals",
+                json!({"action": "clear", "cleared": result.cleared, "remaining": result.remaining, "path": result.path}),
+            ))
+        }
+        DiscordSignalsAction::Queue {
+            pool,
+            base_mint,
+            symbol,
+            author,
+            channel,
+            snippet,
+        } => {
+            let now = chrono::Utc::now();
+            let record = DiscordSignalRecord {
+                id: format!(
+                    "{}-{}",
+                    pool.chars().take(8).collect::<String>(),
+                    now.timestamp_millis()
+                ),
+                pool_address: pool,
+                base_mint,
+                base_symbol: symbol.unwrap_or_else(|| "?".to_string()),
+                signal_source: "discord".to_string(),
+                discord_guild: "manual".to_string(),
+                discord_channel: channel.unwrap_or_else(|| "manual".to_string()),
+                discord_author: author.unwrap_or_else(|| "manual".to_string()),
+                discord_message_snippet: snippet.unwrap_or_default().chars().take(120).collect(),
+                queued_at: now.to_rfc3339(),
+                rug_score: None,
+                total_fees_sol: None,
+                token_age_minutes: None,
+                status: DiscordSignalStatus::Pending,
+                discovery_pool: None,
+            };
+            store.queue(record.clone())?;
+            Ok(json_command_output(
+                "discord-signals",
+                json!({"action": "queue", "count": store.signals.len(), "pending": store.pending().len(), "signal": record, "path": path.display().to_string()}),
+            ))
+        }
+    }
+}
+
 fn run_strategy_command(action: StrategyAction, state_path: &str) -> Result<CliOutput> {
     let path = strategy_library_path_for_state(state_path);
     let mut store = crate::strategy_library::StrategyLibraryStore::load(&path)?;
@@ -1216,6 +1319,7 @@ pub async fn run_cli_command(
         CliCommand::Evolve => run_evolve_command(config, state_path),
         CliCommand::PoolMemory { action } => run_pool_memory_command(action, state_path),
         CliCommand::Blacklist { action } => run_blacklist_command(action, state_path),
+        CliCommand::DiscordSignals { action } => run_discord_signals_command(action, state_path),
         CliCommand::Strategies { action } => run_strategy_command(action, state_path),
         CliCommand::Status => {
             let positions = PositionState::load(state_path).unwrap_or_default();
@@ -1857,6 +1961,32 @@ mod tests {
                 },
             })
         );
+        assert_eq!(
+            parse_cli_args(&args(&[
+                "meridian",
+                "discord-signals",
+                "queue",
+                "--pool",
+                "Pool111",
+                "--base-mint",
+                "Mint111",
+                "--symbol",
+                "DISC",
+                "--author",
+                "Metlex Pool Bot",
+            ]))
+            .unwrap(),
+            Some(CliCommand::DiscordSignals {
+                action: DiscordSignalsAction::Queue {
+                    pool: "Pool111".to_string(),
+                    base_mint: "Mint111".to_string(),
+                    symbol: Some("DISC".to_string()),
+                    author: Some("Metlex Pool Bot".to_string()),
+                    channel: None,
+                    snippet: None,
+                },
+            })
+        );
     }
 
     #[test]
@@ -1923,6 +2053,77 @@ mod tests {
         assert_eq!(parsed["data"]["count"], 5);
         assert_eq!(parsed["data"]["path"], library_path.display().to_string());
         assert!(library_path.exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn discord_signals_cli_queue_list_and_clear_use_isolated_state_dir() {
+        let dir = unique_test_dir("discord-signals-cli");
+        std::fs::create_dir_all(&dir).expect("test dir should be created");
+        let state_path = dir.join("meridian-state.json");
+        let config = Config::default();
+
+        let queue_output = run_cli_command(
+            CliCommand::DiscordSignals {
+                action: DiscordSignalsAction::Queue {
+                    pool: "Pool111".to_string(),
+                    base_mint: "Mint111".to_string(),
+                    symbol: Some("DISC".to_string()),
+                    author: Some("Metlex Pool Bot".to_string()),
+                    channel: Some("alpha".to_string()),
+                    snippet: Some("new pool".to_string()),
+                },
+            },
+            &config,
+            state_path.to_str().expect("state path should be utf8"),
+        )
+        .await
+        .expect("discord signal queue should persist without network");
+        let queued: serde_json::Value =
+            serde_json::from_str(&queue_output.render().unwrap()).expect("queue output JSON");
+        let signals_path = dir.join("discord-signals.json");
+        assert_eq!(queued["command"], "discord-signals");
+        assert_eq!(queued["data"]["action"], "queue");
+        assert_eq!(queued["data"]["pending"], 1);
+        assert_eq!(queued["data"]["path"], signals_path.display().to_string());
+        assert!(signals_path.exists());
+
+        let list_output = run_cli_command(
+            CliCommand::DiscordSignals {
+                action: DiscordSignalsAction::List,
+            },
+            &config,
+            state_path.to_str().expect("state path should be utf8"),
+        )
+        .await
+        .expect("discord signal list should read queue");
+        let listed: serde_json::Value =
+            serde_json::from_str(&list_output.render().unwrap()).expect("list output JSON");
+        assert_eq!(listed["data"]["count"], 1);
+        assert_eq!(listed["data"]["signals"][0]["symbol"], "DISC");
+
+        let mut saved: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&signals_path).expect("signals file should exist"),
+        )
+        .expect("signals file JSON");
+        saved[0]["status"] = serde_json::Value::String("processed".to_string());
+        std::fs::write(&signals_path, serde_json::to_string_pretty(&saved).unwrap())
+            .expect("signals file should be writable");
+
+        let clear_output = run_cli_command(
+            CliCommand::DiscordSignals {
+                action: DiscordSignalsAction::Clear,
+            },
+            &config,
+            state_path.to_str().expect("state path should be utf8"),
+        )
+        .await
+        .expect("discord signal clear should remove processed signals");
+        let cleared: serde_json::Value =
+            serde_json::from_str(&clear_output.render().unwrap()).expect("clear output JSON");
+        assert_eq!(cleared["data"]["cleared"], 1);
+        assert_eq!(cleared["data"]["remaining"], 0);
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -15,7 +15,10 @@
     "minTokenFeesSol": 30,
     "maxBundlersPct": 30,
     "maxTop10Pct": 60,
-    "blockedLaunchpads": []
+    "blockedLaunchpads": [],
+    "allowedLaunchpads": [],
+    "useDiscordSignals": false,
+    "discordSignalMode": "merge"
   },
   "management": {
     "deployAmountSol": 0.5,

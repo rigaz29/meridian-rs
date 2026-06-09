@@ -73,7 +73,7 @@ Reference target: [`yunus-0x/meridian`](https://github.com/yunus-0x/meridian)
 
 ### Phase 5 — Screening enrichment parity
 
-- [ ] Discord signal queue and pre-check pipeline
+- [x] Discord signal queue and pre-check pipeline
 - [ ] PVP/rival-pool risk detection
 - [ ] Launchpad allow/block filters
 - [ ] Timeframe-scaled screening thresholds
@@ -131,6 +131,8 @@ cargo run -- balance --wallet <wallet>
 cargo run -- positions --wallet <wallet>
 cargo run -- pnl --pool <pool> --position <position> --wallet <wallet>
 cargo run -- candidates --limit 3
+cargo run -- discord-signals
+cargo run -- discord-signals queue --pool <pool> --base-mint <mint> --symbol <symbol>
 cargo run -- deploy --pool <pool> --amount <sol> --bins-below 35 --bins-above 0 --strategy spot --dry-run
 cargo run -- claim --position <position>
 cargo run -- close --position <position> --reason "low yield" --skip-swap
@@ -155,6 +157,8 @@ The Rust port accepts both the nested Rust config format and the original Node.j
 
 Agent Meridian / LPAgent mutable relay execution is documented as replaced by native Rust execution for deploy/claim/close/swap paths; read-only LPAgent analytics remain available for top-LPer study. See [`docs/agent-meridian-relay.md`](docs/agent-meridian-relay.md).
 
+Discord signal queue/pre-check parity is Rust-native and data-dir isolated through `discord-signals.json`; see [`docs/discord-signals.md`](docs/discord-signals.md).
+
 **Never commit your real `user-config.json` or API keys.**
 
 ## Runtime State
@@ -163,6 +167,7 @@ By default, mutable runtime files are isolated under `~/.meridian/` instead of t
 
 - `~/.meridian/meridian-state.json` — tracked positions and recent position events
 - `~/.meridian/pool-memory.json` — pool notes, history, and cooldown memory
+- `~/.meridian/discord-signals.json` — pending/processed Discord signal queue for screening enrichment
 - `~/.meridian/.env` — optional global runtime environment file
 
 Overrides:

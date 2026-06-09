@@ -1,5 +1,6 @@
 use crate::config::types::ScreeningConfig;
 use crate::models::pool::{CondensedPool, PoolDiscoveryResponse, PoolToken, RawPool};
+use crate::tools::discord_signals::{merge_discord_signal_pools, DiscordSignalStore};
 use crate::utils::logger::module::info;
 use anyhow::{Context, Result};
 use reqwest::Client;
@@ -103,7 +104,34 @@ impl Screener {
         }
 
         let data: PoolDiscoveryResponse = resp.json().await?;
-        Ok(data.data.unwrap_or_default())
+        let mut raw_pools = data.data.unwrap_or_default();
+        if s.use_discord_signals {
+            match DiscordSignalStore::load_default() {
+                Ok(store) => {
+                    let pending = store.pending_cloned();
+                    if !pending.is_empty() {
+                        info(
+                            "screening",
+                            &format!(
+                                "Merging {} pending Discord signal(s) from {}",
+                                pending.len(),
+                                store.path.display()
+                            ),
+                        );
+                    }
+                    raw_pools = merge_discord_signal_pools(
+                        raw_pools,
+                        &pending,
+                        s.discord_signal_mode.as_deref(),
+                    );
+                }
+                Err(error) => info(
+                    "screening",
+                    &format!("Discord signal queue load failed: {error}"),
+                ),
+            }
+        }
+        Ok(raw_pools)
     }
 
     /// Get pool detail for a specific address
@@ -297,11 +325,16 @@ impl Screener {
             fees_sol: pool.fee.unwrap_or(0.0),
             launchpad: base
                 .and_then(|b| b.launchpad.as_deref().or(b.launchpad_platform.as_deref()))
-                .map(String::from),
+                .map(String::from)
+                .or_else(|| pool.base_token_launchpad.clone()),
             dev: None,
             bundlers_pct: None,
             top10_pct: None,
-            discord_signal: None,
+            discord_signal: pool
+                .extra
+                .get("discord_signal")
+                .and_then(|value| value.as_bool())
+                .filter(|value| *value),
         }
     }
 

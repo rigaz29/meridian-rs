@@ -1,6 +1,7 @@
 pub mod agent_meridian;
 pub mod blacklist;
 pub mod definitions;
+pub mod discord_signals;
 pub mod dlmm;
 pub mod executor;
 pub mod meteora_native;
