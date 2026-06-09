@@ -77,11 +77,17 @@ pub fn vps_config() -> Config {
         },
 
         llm: LlmConfig {
-            management_model: "mimo-v2.5".to_string(),
-            screening_model: "mimo-v2.5".to_string(),
-            general_model: "mimo-v2.5".to_string(),
-            base_url: "https://token-plan-sgp.xiaomimimo.com/v1".to_string(),
-            api_key: None, // from OPENROUTER_API_KEY or LLM_API_KEY env
+            management_model: std::env::var("MANAGEMENT_MODEL")
+                .unwrap_or_else(|_| "mimo-v2.5".to_string()),
+            screening_model: std::env::var("SCREENING_MODEL")
+                .unwrap_or_else(|_| "mimo-v2.5".to_string()),
+            general_model: std::env::var("GENERAL_MODEL")
+                .unwrap_or_else(|_| "mimo-v2.5".to_string()),
+            base_url: std::env::var("LLM_BASE_URL")
+                .unwrap_or_else(|_| "https://token-plan-sgp.xiaomimimo.com/v1".to_string()),
+            api_key: std::env::var("LLM_API_KEY")
+                .ok()
+                .or_else(|| std::env::var("OPENROUTER_API_KEY").ok()),
             temperature: 0.373,
             max_tokens: 4096,
             max_steps: 20,
@@ -103,19 +109,27 @@ pub fn vps_config() -> Config {
         tokens: TokensConfig::default(),
 
         api: ApiConfig {
-            helius_rpc_url: None, // from RPC_URL env
-            helius_api_key: None, // from HELIUS_API_KEY env
-            agent_meridian_base: Some("https://api.agentmeridian.xyz/api".to_string()),
-            agent_meridian_key: None, // from PUBLIC_API_KEY env
+            helius_rpc_url: std::env::var("RPC_URL")
+                .ok()
+                .or_else(|| std::env::var("HELIUS_RPC_URL").ok()),
+            helius_api_key: std::env::var("HELIUS_API_KEY").ok(),
+            agent_meridian_base: std::env::var("AGENT_MERIDIAN_API_URL")
+                .ok()
+                .map(Some)
+                .unwrap_or_else(|| Some("https://api.agentmeridian.xyz/api".to_string())),
+            agent_meridian_key: std::env::var("PUBLIC_API_KEY").ok(),
             lp_agent_relay_enabled: true,
-            telegram_bot_token: None, // from TELEGRAM_BOT_TOKEN env
-            telegram_chat_id: None,   // from TELEGRAM_CHAT_ID env
+            telegram_bot_token: std::env::var("TELEGRAM_BOT_TOKEN").ok(),
+            telegram_chat_id: std::env::var("TELEGRAM_CHAT_ID").ok(),
         },
 
         jupiter: JupiterConfig {
-            api_key: None,          // from JUPITER_API_KEY env
-            referral_account: None, // from JUPITER_REFERRAL_ACCOUNT env
-            referral_fee_bps: 25,
+            api_key: std::env::var("JUPITER_API_KEY").ok(),
+            referral_account: std::env::var("JUPITER_REFERRAL_ACCOUNT").ok(),
+            referral_fee_bps: std::env::var("JUPITER_REFERRAL_FEE_BPS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(25),
         },
 
         indicators: IndicatorsConfig {
