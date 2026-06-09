@@ -1,5 +1,6 @@
 pub mod llm_config;
 pub mod loader;
+pub mod screening_scales;
 pub mod types;
 
 pub use loader::{

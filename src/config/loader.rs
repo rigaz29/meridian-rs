@@ -345,11 +345,36 @@ fn config_from_flat_js_value(value: &Value) -> Config {
 
     if let Some(indicators) = obj.get("chartIndicators").and_then(Value::as_object) {
         set_bool(indicators, "enabled", &mut config.indicators.enabled);
+        set_opt_string(
+            indicators,
+            "entryPreset",
+            &mut config.indicators.entry_preset,
+        );
+        set_opt_string(indicators, "exitPreset", &mut config.indicators.exit_preset);
+        set_u32(indicators, "rsiLength", &mut config.indicators.rsi_length);
+        set_vec_string(indicators, "intervals", &mut config.indicators.intervals);
+        set_u32(indicators, "candles", &mut config.indicators.candles);
+        set_f64(
+            indicators,
+            "rsiOversold",
+            &mut config.indicators.rsi_oversold,
+        );
+        set_f64(
+            indicators,
+            "rsiOverbought",
+            &mut config.indicators.rsi_overbought,
+        );
+        set_bool(
+            indicators,
+            "requireAllIntervals",
+            &mut config.indicators.require_all_intervals,
+        );
+
         let mut presets = Vec::new();
-        if let Some(entry) = non_empty_string(indicators, "entryPreset") {
+        if let Some(entry) = config.indicators.entry_preset.clone() {
             presets.push(entry);
         }
-        if let Some(exit) = non_empty_string(indicators, "exitPreset") {
+        if let Some(exit) = config.indicators.exit_preset.clone() {
             if !presets.contains(&exit) {
                 presets.push(exit);
             }
@@ -758,7 +783,17 @@ mod tests {
           "publicApiKey": "public-test",
           "lpAgentRelayEnabled": true,
           "telegramChatId": "12345",
-          "chartIndicators": { "enabled": true, "entryPreset": "supertrend_break", "exitPreset": "rsi_exit" }
+          "chartIndicators": {
+            "enabled": true,
+            "entryPreset": "supertrend_break",
+            "exitPreset": "rsi_reversal",
+            "rsiLength": 3,
+            "intervals": ["5_MINUTE", "15_MINUTE"],
+            "candles": 199,
+            "rsiOversold": 25,
+            "rsiOverbought": 75,
+            "requireAllIntervals": true
+          }
         }
         "#;
 
@@ -824,9 +859,23 @@ mod tests {
         assert_eq!(config.api.telegram_chat_id.as_deref(), Some("12345"));
         assert!(config.indicators.enabled);
         assert_eq!(
-            config.indicators.presets,
-            vec!["supertrend_break", "rsi_exit"]
+            config.indicators.entry_preset.as_deref(),
+            Some("supertrend_break")
         );
+        assert_eq!(
+            config.indicators.exit_preset.as_deref(),
+            Some("rsi_reversal")
+        );
+        assert_eq!(
+            config.indicators.presets,
+            vec!["supertrend_break", "rsi_reversal"]
+        );
+        assert_eq!(config.indicators.rsi_length, 3);
+        assert_eq!(config.indicators.intervals, vec!["5_MINUTE", "15_MINUTE"]);
+        assert_eq!(config.indicators.candles, 199);
+        assert_eq!(config.indicators.rsi_oversold, 25.0);
+        assert_eq!(config.indicators.rsi_overbought, 75.0);
+        assert!(config.indicators.require_all_intervals);
     }
 
     #[test]

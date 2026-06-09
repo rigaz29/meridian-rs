@@ -833,10 +833,10 @@ impl ToolExecutor {
                 let limit = args["limit"].as_u64().unwrap_or(3) as usize;
                 match self
                     .screener
-                    .get_top_candidates(&config.screening, limit)
+                    .get_top_candidates_with_rejections(&config.screening, limit)
                     .await
                 {
-                    Ok(candidates) => Ok(serde_json::to_string_pretty(&candidates)?),
+                    Ok(result) => Ok(serde_json::to_string_pretty(&result)?),
                     Err(e) => Ok(format!("{{\"error\": \"{}\"}}", e)),
                 }
             }
@@ -891,11 +891,14 @@ impl ToolExecutor {
                 }
             }
             "check_smart_wallets_on_pool" => {
-                let mint = args["mint"].as_str().unwrap_or("");
-                if mint.is_empty() {
-                    anyhow::bail!("mint required");
+                let pool = args["pool_address"]
+                    .as_str()
+                    .or_else(|| args["pool"].as_str())
+                    .unwrap_or("");
+                if pool.is_empty() {
+                    anyhow::bail!("pool_address required");
                 }
-                match check_smart_wallets_on_pool(mint).await {
+                match check_smart_wallets_on_pool(pool).await {
                     Ok(result) => Ok(serde_json::to_string_pretty(&result)?),
                     Err(e) => Ok(format!("{{\"error\": \"{}\"}}", e)),
                 }
@@ -1213,6 +1216,40 @@ mod tests {
             total_usd: 0.0,
             error: None,
         }
+    }
+
+    #[test]
+    fn check_smart_wallets_on_pool_dispatch_uses_pool_address_argument() {
+        let _lock = ENV_LOCK.lock().expect("env test lock");
+        let _env = EnvGuard::clear(&["MERIDIAN_DATA_DIR", "HELIUS_RPC_URL"]);
+        let dir = unique_test_dir("smart-wallet-pool-dispatch");
+        std::env::set_var("MERIDIAN_DATA_DIR", &dir);
+
+        let result = tokio::runtime::Runtime::new()
+            .expect("tokio runtime")
+            .block_on(async {
+                let mut executor = ToolExecutor::new("wallet");
+                let config = Config::default();
+                let mut positions = PositionState::default();
+                let mut pool_memory = PoolMemoryStore::default();
+                executor
+                    .dispatch(
+                        "check_smart_wallets_on_pool",
+                        &json!({"pool_address": "PoolAddress111"}),
+                        &config,
+                        &mut positions,
+                        &mut pool_memory,
+                    )
+                    .await
+            })
+            .expect("dispatch should accept pool_address");
+        let value: Value =
+            serde_json::from_str(&result).expect("smart wallet result should be json");
+
+        assert_eq!(value["pool"], "PoolAddress111");
+        assert_eq!(value["trackedWallets"], 0);
+        assert_eq!(value["confidenceBoost"], false);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]

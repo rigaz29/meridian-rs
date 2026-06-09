@@ -67,6 +67,16 @@ struct JupiterStats24h {
 /// Normalised token info returned by `get_token_info`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TokenInfoSearchResult {
+    pub found: bool,
+    pub query: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub results: Vec<TokenInfo>,
+}
+
+/// Normalised token info returned by `get_token_info`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TokenInfo {
     pub mint: String,
     pub name: Option<String>,
@@ -108,6 +118,15 @@ pub struct TokenStats1h {
 /// Normalised holder entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TokenHolderFunding {
+    pub address: String,
+    pub amount: Option<String>,
+    pub slot: Option<u64>,
+}
+
+/// Normalised holder entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TokenHolder {
     pub address: String,
     pub amount: Option<String>,
@@ -115,6 +134,8 @@ pub struct TokenHolder {
     pub sol_balance: Option<String>,
     pub tags: Option<Vec<String>>,
     pub is_pool: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub funding: Option<TokenHolderFunding>,
 }
 
 /// Response from the ChainInsight narrative endpoint.
@@ -129,12 +150,31 @@ pub struct TokenNarrative {
 /// Full holder-analysis result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SmartWalletTokenHolding {
+    pub name: String,
+    pub category: Option<String>,
+    pub address: String,
+    pub pct: Option<f64>,
+    pub sol_balance: Option<String>,
+    pub pnl: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TokenHolderMeta {
+    pub total_supply: Option<f64>,
+    pub global_fees_sol: Option<f64>,
+}
+
+/// Full holder-analysis result.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TokenHoldersResult {
     pub mint: String,
     pub global_fees_sol: Option<f64>,
     pub total_fetched: usize,
     pub showing: usize,
     pub top_10_real_holders_pct: f64,
+    pub smart_wallets_holding: Vec<SmartWalletTokenHolding>,
     pub holders: Vec<TokenHolder>,
 }
 
@@ -151,32 +191,15 @@ pub struct SmartWalletPoolCheck {
 
 // ─── Functions ──────────────────────────────────────────────────
 
-/// Search Jupiter datapi for a mint address (or symbol/name) and return
-/// condensed token info useful for confidence scoring.
-pub async fn get_token_info(mint: &str) -> Result<TokenInfo> {
-    let client = Client::new();
-    let url = format!("{}/assets/search?query={}", DATAPI_BASE, mint);
+fn round2(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
+}
 
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .context("Token search API request failed")?;
+fn round4(value: f64) -> f64 {
+    (value * 10_000.0).round() / 10_000.0
+}
 
-    if !resp.status().is_success() {
-        return Err(anyhow::anyhow!("Token search API error: {}", resp.status()));
-    }
-
-    let data: Vec<JupiterSearchResult> = resp
-        .json()
-        .await
-        .context("Failed to parse token search response")?;
-
-    let first = data
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("Token not found for query: {}", mint))?;
-
+fn token_info_from_jupiter(first: JupiterSearchResult) -> TokenInfo {
     let audit = first.audit.map(|a| TokenAudit {
         mint_disabled: a.mint_authority_disabled,
         freeze_disabled: a.freeze_authority_disabled,
@@ -193,9 +216,9 @@ pub async fn get_token_info(mint: &str) -> Result<TokenInfo> {
         net_buyers: s.num_net_buyers,
     });
 
-    let global_fees = first.fees.map(|f| (f * 100.0).round() / 100.0);
+    let global_fees = first.fees.map(round2);
 
-    let info = TokenInfo {
+    TokenInfo {
         mint: first.id,
         name: first.name,
         symbol: first.symbol,
@@ -211,14 +234,64 @@ pub async fn get_token_info(mint: &str) -> Result<TokenInfo> {
         audit,
         stats_1h,
         stats_24h_net_buyers: first.stats_24h.and_then(|s| s.num_net_buyers),
-    };
+    }
+}
+
+fn token_info_search_result_from_jupiter(
+    query: &str,
+    data: Vec<JupiterSearchResult>,
+) -> TokenInfoSearchResult {
+    let results: Vec<TokenInfo> = data
+        .into_iter()
+        .take(5)
+        .map(token_info_from_jupiter)
+        .collect();
+    TokenInfoSearchResult {
+        found: !results.is_empty(),
+        query: query.to_string(),
+        results,
+    }
+}
+
+/// Search Jupiter datapi for a mint address (or symbol/name) and return
+/// the JS-compatible search envelope.
+pub async fn search_token_info(query: &str) -> Result<TokenInfoSearchResult> {
+    let client = Client::new();
+    let url = format!("{}/assets/search?query={}", DATAPI_BASE, query);
+
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .context("Token search API request failed")?;
+
+    if !resp.status().is_success() {
+        return Err(anyhow::anyhow!("Token search API error: {}", resp.status()));
+    }
+
+    let data: Vec<JupiterSearchResult> = resp
+        .json()
+        .await
+        .context("Failed to parse token search response")?;
+    Ok(token_info_search_result_from_jupiter(query, data))
+}
+
+/// Search Jupiter datapi for a mint address (or symbol/name) and return
+/// condensed token info useful for confidence scoring.
+pub async fn get_token_info(mint: &str) -> Result<TokenInfo> {
+    let search = search_token_info(mint).await?;
+    let info = search
+        .results
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Token not found for query: {}", mint))?;
 
     module::info(
         "token",
         &format!(
             "get_token_info: {} ({})",
             info.symbol.as_deref().unwrap_or("?"),
-            &info.mint[..8]
+            &info.mint[..8.min(info.mint.len())]
         ),
     );
     Ok(info)
@@ -251,15 +324,25 @@ pub async fn get_token_holders(mint: &str, limit: usize) -> Result<TokenHoldersR
     }
 
     // Token info is optional (for total supply / fees)
-    let total_supply = if let Ok(resp) = token_resp {
+    let token_meta = if let Ok(resp) = token_resp {
         if resp.status().is_success() {
             let arr: Vec<JupiterSearchResult> = resp.json().await.unwrap_or_default();
-            arr.first().and_then(|t| t.total_supply.or(t.circ_supply))
+            let token = arr.first();
+            TokenHolderMeta {
+                total_supply: token.and_then(|t| t.total_supply.or(t.circ_supply)),
+                global_fees_sol: token.and_then(|t| t.fees.map(round2)),
+            }
         } else {
-            None
+            TokenHolderMeta {
+                total_supply: None,
+                global_fees_sol: None,
+            }
         }
     } else {
-        None
+        TokenHolderMeta {
+            total_supply: None,
+            global_fees_sol: None,
+        }
     };
 
     // The holders response can be an array or an object with `holders`/`data`
@@ -280,12 +363,32 @@ pub async fn get_token_holders(mint: &str, limit: usize) -> Result<TokenHoldersR
         HoldersBody::Empty => vec![],
     };
 
+    let result = token_holders_result_from_raw(mint, raw_list, token_meta, limit, vec![]);
+
+    module::info(
+        "token",
+        &format!(
+            "get_token_holders: {} — fetched {} showing {}",
+            mint, result.total_fetched, result.showing
+        ),
+    );
+
+    Ok(result)
+}
+
+fn token_holders_result_from_raw(
+    mint: &str,
+    raw_list: Vec<HolderRaw>,
+    token_meta: TokenHolderMeta,
+    limit: usize,
+    smart_wallets_holding: Vec<SmartWalletTokenHolding>,
+) -> TokenHoldersResult {
     let pool_re = regex::Regex::new(r"(?i)pool|amm|liquidity|raydium|orca|meteora").unwrap();
 
     let total_fetched = raw_list.len();
     let mapped: Vec<TokenHolder> = raw_list
         .into_iter()
-        .take(limit)
+        .take(limit.min(100))
         .map(|h| {
             let tags: Vec<String> = h
                 .tags
@@ -296,22 +399,31 @@ pub async fn get_token_holders(mint: &str, limit: usize) -> Result<TokenHoldersR
 
             let is_pool = tags.iter().any(|t| pool_re.is_match(t));
 
-            let pct = if let Some(ts) = total_supply {
+            let pct = if let Some(ts) = token_meta.total_supply {
                 h.amount
                     .as_deref()
                     .and_then(|a| a.parse::<f64>().ok())
-                    .map(|amount| ((amount / ts) * 10000.0).round() / 10000.0)
+                    .map(|amount| round4((amount / ts) * 100.0))
             } else {
-                h.percentage
+                h.percentage.or(h.pct).map(round4)
             };
 
+            let funding = h.address_info.and_then(|info| {
+                info.funding_address.map(|address| TokenHolderFunding {
+                    address,
+                    amount: info.funding_amount,
+                    slot: info.funding_slot,
+                })
+            });
+
             TokenHolder {
-                address: h.address.unwrap_or_default(),
+                address: h.address.or(h.wallet).unwrap_or_default(),
                 amount: h.amount,
                 pct,
-                sol_balance: h.sol_balance_display,
+                sol_balance: h.sol_balance_display.or(h.sol_balance),
                 tags: if tags.is_empty() { None } else { Some(tags) },
                 is_pool,
+                funding,
             }
         })
         .collect();
@@ -323,26 +435,15 @@ pub async fn get_token_holders(mint: &str, limit: usize) -> Result<TokenHoldersR
         .map(|h| h.pct.unwrap_or(0.0))
         .sum();
 
-    let global_fees = None; // Would need a separate call; omit for now
-
-    module::info(
-        "token",
-        &format!(
-            "get_token_holders: {} — fetched {} showing {}",
-            mint,
-            total_fetched,
-            mapped.len()
-        ),
-    );
-
-    Ok(TokenHoldersResult {
+    TokenHoldersResult {
         mint: mint.to_string(),
-        global_fees_sol: global_fees,
+        global_fees_sol: token_meta.global_fees_sol.map(round2),
         total_fetched,
         showing: mapped.len(),
-        top_10_real_holders_pct: (top10_pct * 100.0).round() / 100.0,
+        top_10_real_holders_pct: round2(top10_pct),
+        smart_wallets_holding,
         holders: mapped,
-    })
+    }
 }
 
 /// Get the narrative/story behind a token from Jupiter ChainInsight.
@@ -476,15 +577,26 @@ pub async fn check_smart_wallets_on_pool(pool_address: &str) -> Result<SmartWall
 // ─── Internal helpers ──────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct HolderRaw {
     address: Option<String>,
     wallet: Option<String>,
     amount: Option<String>,
     percentage: Option<f64>,
+    pct: Option<f64>,
     sol_balance_display: Option<String>,
     sol_balance: Option<String>,
+    address_info: Option<HolderAddressInfo>,
     #[serde(default)]
     tags: Option<Vec<HolderTag>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HolderAddressInfo {
+    funding_address: Option<String>,
+    funding_amount: Option<String>,
+    funding_slot: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -575,4 +687,116 @@ async fn fetch_wallet_positions(
     }
 
     Ok(pool_addresses)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn token_search_result_preserves_audit_stats_and_global_fees() {
+        let raw: Vec<JupiterSearchResult> = serde_json::from_value(json!([
+            {
+                "id": "MintMoon",
+                "name": "Moon Token",
+                "symbol": "MOON",
+                "mcap": 123456,
+                "usdPrice": 0.0123,
+                "liquidity": 9999,
+                "holderCount": 777,
+                "organicScore": 88,
+                "organicScoreLabel": "high",
+                "launchpad": "meteora",
+                "graduatedPool": "PoolMoon",
+                "fees": 12.3456,
+                "audit": {
+                    "mintAuthorityDisabled": true,
+                    "freezeAuthorityDisabled": true,
+                    "topHoldersPercentage": 42.4242,
+                    "botHoldersPercentage": 3.2121,
+                    "devMigrations": 2
+                },
+                "stats1h": {
+                    "priceChange": 4.567,
+                    "buyVolume": 1111.1,
+                    "sellVolume": 222.2,
+                    "numOrganicBuyers": 44,
+                    "numNetBuyers": 11
+                },
+                "stats24h": { "numNetBuyers": 99 }
+            }
+        ]))
+        .expect("fixture parses");
+
+        let result = token_info_search_result_from_jupiter("MOON", raw);
+
+        assert!(result.found);
+        assert_eq!(result.query, "MOON");
+        assert_eq!(result.results.len(), 1);
+        let token = &result.results[0];
+        assert_eq!(token.mint, "MintMoon");
+        assert_eq!(token.global_fees_sol, Some(12.35));
+        assert!(token.graduated);
+        assert_eq!(token.audit.as_ref().unwrap().top_holders_pct, Some(42.4242));
+        assert_eq!(token.stats_1h.as_ref().unwrap().net_buyers, Some(11));
+        assert_eq!(token.stats_24h_net_buyers, Some(99));
+    }
+
+    #[test]
+    fn holder_mapping_uses_wallet_fallback_funding_fees_and_smart_wallets() {
+        let holders: Vec<HolderRaw> = serde_json::from_value(json!([
+            {
+                "wallet": "SmartWallet111",
+                "amount": "100",
+                "solBalanceDisplay": "1.5 SOL",
+                "addressInfo": {
+                    "fundingAddress": "Funder111",
+                    "fundingAmount": "2.0",
+                    "fundingSlot": 123
+                },
+                "tags": [{ "name": "KOL" }]
+            },
+            {
+                "address": "PoolHolder111",
+                "amount": "500",
+                "solBalance": "9.9",
+                "tags": [{ "name": "Meteora Pool" }]
+            }
+        ]))
+        .expect("holder fixture parses");
+        let smart_wallets = vec![SmartWalletTokenHolding {
+            name: "Sharp LP".to_string(),
+            category: Some("kol".to_string()),
+            address: "SmartWallet111".to_string(),
+            pct: Some(10.0),
+            sol_balance: Some("1.5 SOL".to_string()),
+            pnl: Some(json!({"total_pnl": 42})),
+        }];
+
+        let result = token_holders_result_from_raw(
+            "MintMoon",
+            holders,
+            TokenHolderMeta {
+                total_supply: Some(1_000.0),
+                global_fees_sol: Some(44.444),
+            },
+            20,
+            smart_wallets,
+        );
+
+        assert_eq!(result.global_fees_sol, Some(44.44));
+        assert_eq!(result.total_fetched, 2);
+        assert_eq!(result.showing, 2);
+        assert_eq!(result.top_10_real_holders_pct, 10.0);
+        assert_eq!(result.holders[0].address, "SmartWallet111");
+        assert_eq!(result.holders[0].pct, Some(10.0));
+        assert_eq!(
+            result.holders[0].funding.as_ref().unwrap().address,
+            "Funder111"
+        );
+        assert!(result.holders[1].is_pool);
+        assert_eq!(result.smart_wallets_holding.len(), 1);
+        assert_eq!(result.smart_wallets_holding[0].name, "Sharp LP");
+    }
 }

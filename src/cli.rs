@@ -1362,12 +1362,15 @@ pub async fn run_cli_command(
         }
         CliCommand::Candidates { limit } => {
             let screener = Screener::new();
+            let result = screener
+                .get_top_candidates_with_rejections(&config.screening, limit.unwrap_or(3))
+                .await?;
             Ok(json_command_output(
                 "candidates",
                 json!({
-                    "candidates": screener
-                        .get_top_candidates(&config.screening, limit.unwrap_or(3))
-                        .await?,
+                    "total_screened": result.total_screened,
+                    "candidates": result.candidates,
+                    "filtered_examples": result.filtered_examples,
                 }),
             ))
         }

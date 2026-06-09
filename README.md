@@ -75,11 +75,11 @@ Reference target: [`yunus-0x/meridian`](https://github.com/yunus-0x/meridian)
 
 - [x] Discord signal queue and pre-check pipeline
 - [x] PVP/rival-pool risk detection
-- [ ] Launchpad allow/block filters
-- [ ] Timeframe-scaled screening thresholds
-- [ ] Chart indicator presets for entry/exit confirmation
-- [ ] Token audit, holder, smart-wallet, narrative enrichment parity
-- [ ] Detailed reject reasons for filtered candidates
+- [x] Launchpad allow/block filters
+- [x] Timeframe-scaled screening thresholds
+- [x] Chart indicator presets for entry/exit confirmation
+- [x] Token audit, holder, smart-wallet, narrative enrichment parity
+- [x] Detailed reject reasons for filtered candidates
 
 ### Phase 6 — Control surface parity
 

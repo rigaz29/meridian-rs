@@ -21,6 +21,21 @@ static TIMEFRAME_MINUTES: &[(&str, u32)] = &[
     ("24h", 1440),
 ];
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct FilteredPoolExample {
+    pub name: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ScreeningResult {
+    pub total_screened: usize,
+    pub candidates: Vec<CondensedPool>,
+    pub filtered_examples: Vec<FilteredPoolExample>,
+}
+
 pub struct Screener {
     client: Client,
 }
@@ -193,198 +208,365 @@ impl Screener {
         Ok(())
     }
 
-    /// Hard-filter pools against screening thresholds (post-API filter)
-    fn reject_reason(&self, pool: &RawPool, s: &ScreeningConfig) -> Option<String> {
-        let base = pool.token_x.as_ref();
-        let _quote = pool.token_y.as_ref();
-
-        if pool.base_token_has_critical_warnings == Some(true) {
-            return Some("critical warnings".into());
-        }
-        if pool.quote_token_has_critical_warnings == Some(true) {
-            return Some("quote critical warnings".into());
-        }
-        if pool.base_token_has_high_single_ownership == Some(true) {
-            return Some("high single ownership".into());
-        }
-        if pool.pool_type.as_deref() != Some("dlmm") {
-            return Some("not dlmm".into());
-        }
-
-        let mcap = base.and_then(|b| b.market_cap).or(pool.base_token_mcap);
-        let holders = pool.base_token_holders;
-        let volatility = pool.volatility;
-        let bin_step = pool.dlmm_bin_step;
-        let fee_ratio = pool.fee_active_tvl_ratio;
-        let organic = base
-            .and_then(|b| b.organic_score)
-            .or(pool.base_token_organic_score);
-
-        if mcap.unwrap_or(0.0) < s.min_mcap {
-            return Some(format!("mcap {} < min {}", mcap.unwrap_or(0.0), s.min_mcap));
-        }
-        if mcap.unwrap_or(f64::MAX) > s.max_mcap {
-            return Some(format!("mcap {} > max {}", mcap.unwrap(), s.max_mcap));
-        }
-        if holders.unwrap_or(0) < s.min_holders {
-            return Some(format!(
-                "holders {} < min {}",
-                holders.unwrap_or(0),
-                s.min_holders
-            ));
-        }
-        if pool.volume.unwrap_or(0.0) < s.min_volume {
-            return Some("low volume".into());
-        }
-        if pool.tvl.unwrap_or(pool.active_tvl.unwrap_or(0.0)) < s.min_tvl {
-            return Some("low tvl".into());
-        }
-        if let Some(max) = s.max_tvl {
-            if pool.tvl.unwrap_or(0.0) > max {
-                return Some(format!("tvl > max {}", max));
-            }
-        }
-        if bin_step.unwrap_or(0) < s.min_bin_step {
-            return Some(format!(
-                "bin_step {} < min {}",
-                bin_step.unwrap_or(0),
-                s.min_bin_step
-            ));
-        }
-        if bin_step.unwrap_or(u16::MAX) > s.max_bin_step {
-            return Some(format!(
-                "bin_step {} > max {}",
-                bin_step.unwrap(),
-                s.max_bin_step
-            ));
-        }
-        if fee_ratio.unwrap_or(0.0) < s.min_fee_active_tvl_ratio {
-            return Some("low fee/tvl".into());
-        }
-        if volatility.is_none() || volatility.unwrap_or(0.0) <= 0.0 {
-            return Some("no volatility".into());
-        }
-        if organic.unwrap_or(0.0) < s.min_organic {
-            return Some("low organic".into());
-        }
-
-        // Blocked launchpads
-        let launchpad =
-            base.and_then(|b| b.launchpad.as_deref().or(b.launchpad_platform.as_deref()));
-        if let Some(lp) = launchpad {
-            if s.blocked_launchpads
-                .iter()
-                .any(|b| b.eq_ignore_ascii_case(lp))
-            {
-                return Some(format!("blocked launchpad {}", lp));
-            }
-        }
-        None
-    }
-
-    /// Condense a raw pool into token-optimized format for LLM
-    fn condense(&self, pool: &RawPool) -> CondensedPool {
-        let base = pool.token_x.as_ref();
-        let base_mint = base.and_then(|b| b.address.clone()).unwrap_or_default();
-        let base_symbol = base
-            .and_then(|b| b.symbol.clone())
-            .unwrap_or_else(|| "?".to_string());
-        let base_organic = base
-            .and_then(|b| b.organic_score)
-            .or(pool.base_token_organic_score)
-            .unwrap_or(0.0);
-        let quote_organic = pool
-            .token_y
-            .as_ref()
-            .and_then(|q| q.organic_score)
-            .or(pool.quote_token_organic_score)
-            .unwrap_or(0.0);
-        let mcap = base
-            .and_then(|b| b.market_cap)
-            .or(pool.base_token_mcap)
-            .unwrap_or(0.0);
-
-        CondensedPool {
-            name: pool
-                .name
-                .clone()
-                .unwrap_or_else(|| pool.pool_address.clone().unwrap_or_default()),
-            pool_address: pool.pool_address.clone().unwrap_or_default(),
-            base: PoolToken {
-                mint: base_mint,
-                symbol: base_symbol,
-                organic: base_organic,
-                mcap: Some(mcap),
-            },
-            quote_organic,
-            tvl: pool.tvl.or(pool.active_tvl).unwrap_or(0.0),
-            volume: pool.volume.unwrap_or(0.0),
-            fee_active_tvl_ratio: pool.fee_active_tvl_ratio.unwrap_or(0.0),
-            volatility: pool.volatility.unwrap_or(0.0),
-            bin_step: pool.dlmm_bin_step.unwrap_or(100),
-            score: score_candidate(pool),
-            holders: pool.base_token_holders.unwrap_or(0),
-            mcap,
-            fees_sol: pool.fee.unwrap_or(0.0),
-            launchpad: base
-                .and_then(|b| b.launchpad.as_deref().or(b.launchpad_platform.as_deref()))
-                .map(String::from)
-                .or_else(|| pool.base_token_launchpad.clone()),
-            dev: None,
-            bundlers_pct: None,
-            top10_pct: None,
-            discord_signal: pool
-                .extra
-                .get("discord_signal")
-                .and_then(|value| value.as_bool())
-                .filter(|value| *value),
-            is_pvp: None,
-            pvp_risk: None,
-            pvp_symbol: None,
-            pvp_rival_name: None,
-            pvp_rival_mint: None,
-            pvp_rival_pool: None,
-            pvp_rival_tvl: None,
-            pvp_rival_holders: None,
-            pvp_rival_fees: None,
-        }
-    }
-
     /// Full screening pipeline: discover → filter → condense → score → sort
     pub async fn get_top_candidates(
         &self,
         s: &ScreeningConfig,
         limit: usize,
     ) -> Result<Vec<CondensedPool>> {
-        let raw = self.discover_pools(s, 50).await?;
+        Ok(self
+            .get_top_candidates_with_rejections(s, limit)
+            .await?
+            .candidates)
+    }
+
+    pub async fn get_top_candidates_with_rejections(
+        &self,
+        s: &ScreeningConfig,
+        limit: usize,
+    ) -> Result<ScreeningResult> {
+        let mut raw = self.discover_pools(s, 50).await?;
         info(
             "screening",
             &format!("Discovery returned {} raw pools", raw.len()),
         );
+        self.apply_volatility_timeframe(&mut raw, &s.timeframe)
+            .await?;
 
-        let mut filtered: Vec<CondensedPool> = raw
-            .iter()
-            .filter(|p| self.reject_reason(p, s).is_none())
-            .map(|p| self.condense(p))
-            .collect();
+        let result = screen_raw_pools(raw, s, limit);
 
         info(
             "screening",
-            &format!("{} pools passed filters", filtered.len()),
+            &format!("{} pools passed filters", result.candidates.len()),
         );
 
-        filtered.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        filtered.truncate(limit);
-        apply_pvp_risk_policy(&mut filtered, s);
-        Ok(filtered)
+        Ok(result)
+    }
+}
+
+fn condense_raw_pool(pool: &RawPool) -> CondensedPool {
+    let base = pool.token_x.as_ref();
+    let base_mint = base.and_then(|b| b.address.clone()).unwrap_or_default();
+    let base_symbol = base
+        .and_then(|b| b.symbol.clone())
+        .unwrap_or_else(|| "?".to_string());
+    let base_organic = base
+        .and_then(|b| b.organic_score)
+        .or(pool.base_token_organic_score)
+        .unwrap_or(0.0);
+    let quote_organic = pool
+        .token_y
+        .as_ref()
+        .and_then(|q| q.organic_score)
+        .or(pool.quote_token_organic_score)
+        .unwrap_or(0.0);
+    let mcap = base
+        .and_then(|b| b.market_cap)
+        .or(pool.base_token_mcap)
+        .unwrap_or(0.0);
+
+    CondensedPool {
+        name: pool
+            .name
+            .clone()
+            .unwrap_or_else(|| pool.pool_address.clone().unwrap_or_default()),
+        pool_address: pool.pool_address.clone().unwrap_or_default(),
+        base: PoolToken {
+            mint: base_mint,
+            symbol: base_symbol,
+            organic: base_organic,
+            mcap: Some(mcap),
+        },
+        quote_organic,
+        tvl: pool.tvl.or(pool.active_tvl).unwrap_or(0.0),
+        volume: pool.volume.unwrap_or(0.0),
+        fee_active_tvl_ratio: pool.fee_active_tvl_ratio.unwrap_or(0.0),
+        volatility: pool.volatility.unwrap_or(0.0),
+        bin_step: pool.dlmm_bin_step.unwrap_or(100),
+        score: score_candidate(pool),
+        holders: pool.base_token_holders.unwrap_or(0),
+        mcap,
+        fees_sol: pool.fee.unwrap_or(0.0),
+        launchpad: pool_launchpad(pool),
+        dev: None,
+        bundlers_pct: None,
+        top10_pct: None,
+        discord_signal: pool
+            .extra
+            .get("discord_signal")
+            .and_then(|value| value.as_bool())
+            .filter(|value| *value),
+        is_pvp: None,
+        pvp_risk: None,
+        pvp_symbol: None,
+        pvp_rival_name: None,
+        pvp_rival_mint: None,
+        pvp_rival_pool: None,
+        pvp_rival_tvl: None,
+        pvp_rival_holders: None,
+        pvp_rival_fees: None,
+    }
+}
+
+pub fn screen_raw_pools(raw: Vec<RawPool>, s: &ScreeningConfig, limit: usize) -> ScreeningResult {
+    let total_screened = raw.len();
+    let mut filtered_examples = Vec::new();
+    let mut candidates = Vec::new();
+
+    for pool in raw {
+        if let Some(reason) = raw_pool_screening_reject_reason(&pool, s) {
+            filtered_examples.push(FilteredPoolExample {
+                name: pool
+                    .name
+                    .clone()
+                    .or_else(|| pool.pool_address.clone())
+                    .unwrap_or_else(|| "unknown pool".to_string()),
+                reason,
+            });
+        } else {
+            candidates.push(condense_raw_pool(&pool));
+        }
+    }
+
+    candidates.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    candidates.truncate(limit);
+    apply_pvp_risk_policy_with_rejections(&mut candidates, s, &mut filtered_examples);
+
+    ScreeningResult {
+        total_screened,
+        candidates,
+        filtered_examples,
+    }
+}
+
+pub fn raw_pool_screening_reject_reason(pool: &RawPool, s: &ScreeningConfig) -> Option<String> {
+    let base = pool.token_x.as_ref();
+    let quote = pool.token_y.as_ref();
+    let mcap = base.and_then(|b| b.market_cap).or(pool.base_token_mcap);
+    let holders = pool.base_token_holders;
+    let tvl = pool.tvl.or(pool.active_tvl);
+    let volatility = pool.volatility;
+    let bin_step = pool.dlmm_bin_step;
+    let fee_ratio = pool.fee_active_tvl_ratio;
+    let base_organic = base
+        .and_then(|b| b.organic_score)
+        .or(pool.base_token_organic_score);
+    let quote_organic = quote
+        .and_then(|q| q.organic_score)
+        .or(pool.quote_token_organic_score);
+    let launchpad = pool_launchpad(pool);
+    let created_at = base.and_then(|b| b.created_at);
+
+    if s.exclude_high_supply_concentration
+        && pool.base_token_has_high_supply_concentration == Some(true)
+    {
+        return Some("base token has high supply concentration".into());
+    }
+    if pool.base_token_has_critical_warnings == Some(true) {
+        return Some("base token has critical warnings".into());
+    }
+    if pool.quote_token_has_critical_warnings == Some(true) {
+        return Some("quote token has critical warnings".into());
+    }
+    if pool.base_token_has_high_single_ownership == Some(true) {
+        return Some("base token has high single ownership".into());
+    }
+    if pool
+        .pool_type
+        .as_deref()
+        .is_some_and(|pool_type| pool_type != "dlmm")
+    {
+        return Some(format!(
+            "pool_type {} is not dlmm",
+            pool.pool_type.as_deref().unwrap_or("unknown")
+        ));
+    }
+
+    if mcap.is_none_or(|mcap| mcap < s.min_mcap) {
+        return Some(format!(
+            "mcap {} below minMcap {}",
+            display_optional_f64(mcap),
+            display_f64(s.min_mcap)
+        ));
+    }
+    if mcap.is_some_and(|mcap| mcap > s.max_mcap) {
+        return Some(format!(
+            "mcap {} above maxMcap {}",
+            display_optional_f64(mcap),
+            display_f64(s.max_mcap)
+        ));
+    }
+    if holders.is_none_or(|holders| holders < s.min_holders) {
+        return Some(format!(
+            "holders {} below minHolders {}",
+            holders
+                .map(|holders| holders.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            s.min_holders
+        ));
+    }
+    if pool.volume.is_none_or(|volume| volume < s.min_volume) {
+        return Some(format!(
+            "volume {} below minVolume {}",
+            display_optional_f64(pool.volume),
+            display_f64(s.min_volume)
+        ));
+    }
+    if tvl.is_none_or(|tvl| tvl < s.min_tvl) {
+        return Some(format!(
+            "TVL {} below minTvl {}",
+            display_optional_f64(tvl),
+            display_f64(s.min_tvl)
+        ));
+    }
+    if let Some(max_tvl) = s.max_tvl {
+        if tvl.is_some_and(|tvl| tvl > max_tvl) {
+            return Some(format!(
+                "TVL {} above maxTvl {}",
+                display_optional_f64(tvl),
+                display_f64(max_tvl)
+            ));
+        }
+    }
+    if bin_step.is_none_or(|bin_step| bin_step < s.min_bin_step) {
+        return Some(format!(
+            "bin_step {} below minBinStep {}",
+            bin_step
+                .map(|bin_step| bin_step.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            s.min_bin_step
+        ));
+    }
+    if bin_step.is_some_and(|bin_step| bin_step > s.max_bin_step) {
+        return Some(format!(
+            "bin_step {} above maxBinStep {}",
+            bin_step.unwrap_or_default(),
+            s.max_bin_step
+        ));
+    }
+    if fee_ratio.is_none_or(|fee_ratio| fee_ratio < s.min_fee_active_tvl_ratio) {
+        return Some(format!(
+            "fee/active-TVL {} below minFeeActiveTvlRatio {}",
+            display_optional_f64(fee_ratio),
+            display_f64(s.min_fee_active_tvl_ratio)
+        ));
+    }
+    if volatility.is_none_or(|volatility| volatility <= 0.0) {
+        return Some(format!(
+            "volatility {} is unusable",
+            display_optional_f64(volatility)
+        ));
+    }
+    if base_organic.is_none_or(|organic| organic < s.min_organic) {
+        return Some(format!(
+            "base organic {} below minOrganic {}",
+            display_optional_f64(base_organic),
+            display_f64(s.min_organic)
+        ));
+    }
+    if quote_organic.is_none_or(|organic| organic < s.min_quote_organic) {
+        return Some(format!(
+            "quote organic {} below minQuoteOrganic {}",
+            display_optional_f64(quote_organic),
+            display_f64(s.min_quote_organic)
+        ));
+    }
+    if is_discord_signal(pool)
+        && !s.allowed_launchpads.is_empty()
+        && launchpad
+            .as_deref()
+            .is_some_and(|lp| !includes_case_insensitive(&s.allowed_launchpads, lp))
+    {
+        return Some(format!(
+            "launchpad {} not in allow-list",
+            launchpad.unwrap_or_default()
+        ));
+    }
+    if launchpad
+        .as_deref()
+        .is_some_and(|lp| includes_case_insensitive(&s.blocked_launchpads, lp))
+    {
+        return Some(format!(
+            "blocked launchpad ({})",
+            launchpad.unwrap_or_default()
+        ));
+    }
+    if let Some(hours) = s.min_token_age_hours {
+        let max_created_at = chrono::Utc::now().timestamp_millis() as f64 - hours * 3_600_000.0;
+        if created_at.is_none_or(|created_at| created_at > max_created_at) {
+            return Some(format!("token age below minTokenAgeHours {hours}"));
+        }
+    }
+    if let Some(hours) = s.max_token_age_hours {
+        let min_created_at = chrono::Utc::now().timestamp_millis() as f64 - hours * 3_600_000.0;
+        if created_at.is_some_and(|created_at| created_at < min_created_at) {
+            return Some(format!("token age above maxTokenAgeHours {hours}"));
+        }
+    }
+    None
+}
+
+fn pool_launchpad(pool: &RawPool) -> Option<String> {
+    pool.token_x
+        .as_ref()
+        .and_then(|base| {
+            base.launchpad
+                .clone()
+                .or_else(|| base.launchpad_platform.clone())
+        })
+        .or_else(|| pool.base_token_launchpad.clone())
+        .or_else(|| extra_string(pool, "launchpad"))
+        .or_else(|| extra_string(pool, "launchpad_platform"))
+}
+
+fn extra_string(pool: &RawPool, key: &str) -> Option<String> {
+    pool.extra
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn is_discord_signal(pool: &RawPool) -> bool {
+    pool.extra
+        .get("discord_signal")
+        .and_then(|value| value.as_bool())
+        == Some(true)
+}
+
+fn includes_case_insensitive(values: &[String], value: &str) -> bool {
+    values.iter().any(|entry| entry.eq_ignore_ascii_case(value))
+}
+
+fn display_optional_f64(value: Option<f64>) -> String {
+    value
+        .map(display_f64)
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn display_f64(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{}", value as i64)
+    } else {
+        format!("{}", value)
     }
 }
 
 pub fn apply_pvp_risk_policy(candidates: &mut Vec<CondensedPool>, s: &ScreeningConfig) {
+    let mut ignored = Vec::new();
+    apply_pvp_risk_policy_with_rejections(candidates, s, &mut ignored);
+}
+
+pub fn apply_pvp_risk_policy_with_rejections(
+    candidates: &mut Vec<CondensedPool>,
+    s: &ScreeningConfig,
+    filtered_examples: &mut Vec<FilteredPoolExample>,
+) {
     if !s.avoid_pvp_symbols || candidates.is_empty() {
         return;
     }
@@ -393,7 +575,18 @@ pub fn apply_pvp_risk_policy(candidates: &mut Vec<CondensedPool>, s: &ScreeningC
 
     if s.block_pvp_symbols {
         let before = candidates.len();
-        candidates.retain(|candidate| candidate.is_pvp != Some(true));
+        let mut kept = Vec::with_capacity(candidates.len());
+        for candidate in candidates.drain(..) {
+            if candidate.is_pvp == Some(true) {
+                filtered_examples.push(FilteredPoolExample {
+                    name: candidate.name.clone(),
+                    reason: "PVP hard filter".to_string(),
+                });
+            } else {
+                kept.push(candidate);
+            }
+        }
+        *candidates = kept;
         let removed = before.saturating_sub(candidates.len());
         if removed > 0 {
             info(
@@ -600,5 +793,96 @@ mod tests {
         assert_eq!(json["pvp_risk"], "high");
         assert_eq!(json["pvp_rival_name"], "Moon Rival");
         assert_eq!(json["pvp_rival_mint"], "MintBeta");
+    }
+
+    fn raw_pool(name: &str, pool_address: &str, mint: &str, symbol: &str) -> RawPool {
+        RawPool {
+            pool_address: Some(pool_address.to_string()),
+            name: Some(name.to_string()),
+            pool_type: Some("dlmm".to_string()),
+            tvl: Some(20_000.0),
+            active_tvl: None,
+            volume: Some(10_000.0),
+            fee: Some(40.0),
+            fee_active_tvl_ratio: Some(0.5),
+            volatility: Some(0.8),
+            base_token_holders: Some(800),
+            base_token_mcap: Some(500_000.0),
+            base_token_organic_score: Some(75.0),
+            quote_token_organic_score: Some(80.0),
+            base_token_has_critical_warnings: Some(false),
+            quote_token_has_critical_warnings: Some(false),
+            base_token_has_high_supply_concentration: Some(false),
+            base_token_has_high_single_ownership: Some(false),
+            base_token_launchpad: None,
+            dlmm_bin_step: Some(100),
+            token_x: Some(crate::models::pool::TokenX {
+                address: Some(mint.to_string()),
+                symbol: Some(symbol.to_string()),
+                name: Some(symbol.to_string()),
+                market_cap: Some(500_000.0),
+                organic_score: Some(75.0),
+                launchpad: None,
+                launchpad_platform: None,
+                created_at: Some(0.0),
+            }),
+            token_y: Some(crate::models::pool::TokenY {
+                address: Some("So11111111111111111111111111111111111111112".to_string()),
+                symbol: Some("SOL".to_string()),
+                organic_score: Some(80.0),
+            }),
+            extra: Default::default(),
+        }
+    }
+
+    #[test]
+    fn reject_reason_reports_detailed_threshold_and_launchpad_reasons() {
+        let mut screening = crate::config::types::Config::default().screening;
+        screening.min_volume = 500.0;
+        screening.blocked_launchpads = vec!["pump.fun".to_string()];
+        screening.allowed_launchpads = vec!["meteora".to_string()];
+
+        let mut low_volume = raw_pool("LowVol/SOL", "PoolLow", "MintLow", "LOW");
+        low_volume.volume = None;
+        assert_eq!(
+            raw_pool_screening_reject_reason(&low_volume, &screening).as_deref(),
+            Some("volume unknown below minVolume 500")
+        );
+
+        let mut blocked = raw_pool("Blocked/SOL", "PoolBlocked", "MintBlocked", "BLOCK");
+        blocked.base_token_launchpad = Some("pump.fun".to_string());
+        assert_eq!(
+            raw_pool_screening_reject_reason(&blocked, &screening).as_deref(),
+            Some("blocked launchpad (pump.fun)")
+        );
+
+        let mut discord_not_allowed = raw_pool("Moon/SOL", "PoolMoon", "MintMoon", "MOON");
+        discord_not_allowed.base_token_launchpad = Some("moonshot".to_string());
+        discord_not_allowed
+            .extra
+            .insert("discord_signal".to_string(), serde_json::json!(true));
+        assert_eq!(
+            raw_pool_screening_reject_reason(&discord_not_allowed, &screening).as_deref(),
+            Some("launchpad moonshot not in allow-list")
+        );
+    }
+
+    #[test]
+    fn screen_raw_pools_collects_filtered_examples_with_reasons() {
+        let mut screening = crate::config::types::Config::default().screening;
+        screening.min_volume = 500.0;
+        let mut low_volume = raw_pool("LowVol/SOL", "PoolLow", "MintLow", "LOW");
+        low_volume.volume = None;
+
+        let result = screen_raw_pools(vec![low_volume], &screening, 10);
+
+        assert_eq!(result.total_screened, 1);
+        assert!(result.candidates.is_empty());
+        assert_eq!(result.filtered_examples.len(), 1);
+        assert_eq!(result.filtered_examples[0].name, "LowVol/SOL");
+        assert_eq!(
+            result.filtered_examples[0].reason,
+            "volume unknown below minVolume 500"
+        );
     }
 }

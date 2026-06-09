@@ -346,13 +346,62 @@ fn default_referral_fee_bps() -> u32 {
     50
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndicatorsConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub presets: Vec<String>,
+    #[serde(default)]
+    pub entry_preset: Option<String>,
+    #[serde(default)]
+    pub exit_preset: Option<String>,
+    #[serde(default = "default_indicator_rsi_length")]
+    pub rsi_length: u32,
+    #[serde(default = "default_indicator_intervals")]
+    pub intervals: Vec<String>,
+    #[serde(default = "default_indicator_candles")]
+    pub candles: u32,
+    #[serde(default = "default_indicator_rsi_oversold")]
+    pub rsi_oversold: f64,
+    #[serde(default = "default_indicator_rsi_overbought")]
+    pub rsi_overbought: f64,
+    #[serde(default)]
+    pub require_all_intervals: bool,
+}
+
+impl Default for IndicatorsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            presets: vec![],
+            entry_preset: None,
+            exit_preset: None,
+            rsi_length: default_indicator_rsi_length(),
+            intervals: default_indicator_intervals(),
+            candles: default_indicator_candles(),
+            rsi_oversold: default_indicator_rsi_oversold(),
+            rsi_overbought: default_indicator_rsi_overbought(),
+            require_all_intervals: false,
+        }
+    }
+}
+
+fn default_indicator_rsi_length() -> u32 {
+    2
+}
+fn default_indicator_intervals() -> Vec<String> {
+    vec!["5_MINUTE".to_string()]
+}
+fn default_indicator_candles() -> u32 {
+    298
+}
+fn default_indicator_rsi_oversold() -> f64 {
+    30.0
+}
+fn default_indicator_rsi_overbought() -> f64 {
+    80.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -418,12 +467,13 @@ fn default_darwin_min_samples() -> u64 {
 
 impl Default for Config {
     fn default() -> Self {
+        let screening_defaults = super::screening_scales::screening_defaults_for_timeframe("4h");
         Self {
             screening: ScreeningConfig {
-                min_fee_active_tvl_ratio: 0.05,
+                min_fee_active_tvl_ratio: screening_defaults.min_fee_active_tvl_ratio,
                 min_tvl: 10_000.0,
                 max_tvl: None,
-                min_volume: 500.0,
+                min_volume: screening_defaults.min_volume,
                 min_organic: 60.0,
                 min_quote_organic: 0.0,
                 min_holders: 500,
@@ -431,7 +481,7 @@ impl Default for Config {
                 max_mcap: 10_000_000.0,
                 min_bin_step: 80,
                 max_bin_step: 125,
-                timeframe: "1h".to_string(),
+                timeframe: screening_defaults.timeframe,
                 category: "trending".to_string(),
                 min_token_fees_sol: 30.0,
                 max_bot_holders_pct: 30.0,
