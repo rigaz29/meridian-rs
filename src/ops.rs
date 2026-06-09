@@ -309,7 +309,6 @@ mod tests {
             "GENERAL_MODEL=",
             "MERIDIAN_DATA_DIR=",
             "MERIDIAN_STATE_PATH=",
-            "MERIDIAN_WEB_ADDR=",
             "HEALTH_PORT=",
             "MERIDIAN_LOCK_PATH=",
             "JUPITER_API_KEY=",

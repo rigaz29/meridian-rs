@@ -20,7 +20,6 @@ mod state;
 mod strategy_library;
 mod tools;
 mod utils;
-mod web;
 
 use config::llm_config::LlmCredentials;
 use config::{load_config, load_env_files, meridian_data_path};
@@ -186,10 +185,7 @@ async fn main() -> Result<()> {
             ops::StartupCheckStatus::Warn => warn("startup", &check.message),
         }
     }
-    let web_addr =
-        std::env::var("MERIDIAN_WEB_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
     for check in [
-        ops::check_port_available("web_port", &web_addr),
         ops::check_port_available("health_port", &format!("0.0.0.0:{health_port}")),
     ] {
         match check.status {
@@ -220,21 +216,6 @@ async fn main() -> Result<()> {
         signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
         info("shutdown", "Ctrl+C received, shutting down gracefully...");
         let _ = shutdown_tx_clone.send(true);
-    });
-
-    // ── Web UI (Meridian OS) ───────────────────────────────────
-    let mut shutdown_web = shutdown_rx.clone();
-    tokio::spawn(async move {
-        tokio::select! {
-            result = web::start_web_server() => {
-                if let Err(e) = result {
-                    warn("web", &format!("Web UI stopped: {}", e));
-                }
-            }
-            _ = shutdown_web.changed() => {
-                info("web", "Shutdown signal received, stopping Web UI");
-            }
-        }
     });
 
     info("main", "Starting cycle scheduler...");
