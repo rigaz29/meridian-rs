@@ -325,6 +325,11 @@ fn config_from_flat_js_value(value: &Value) -> Config {
         &mut config.api.agent_meridian_base,
     );
     set_opt_string(obj, "publicApiKey", &mut config.api.agent_meridian_key);
+    set_bool(
+        obj,
+        "lpAgentRelayEnabled",
+        &mut config.api.lp_agent_relay_enabled,
+    );
     set_opt_string(obj, "telegramBotToken", &mut config.api.telegram_bot_token);
     set_opt_string(obj, "telegramChatId", &mut config.api.telegram_chat_id);
 
@@ -737,6 +742,7 @@ mod tests {
           "darwinMinSamples": 6,
           "agentMeridianApiUrl": "https://api.agentmeridian.xyz/api",
           "publicApiKey": "public-test",
+          "lpAgentRelayEnabled": true,
           "telegramChatId": "12345",
           "chartIndicators": { "enabled": true, "entryPreset": "supertrend_break", "exitPreset": "rsi_exit" }
         }
@@ -793,6 +799,7 @@ mod tests {
             config.api.agent_meridian_key.as_deref(),
             Some("public-test")
         );
+        assert!(config.api.lp_agent_relay_enabled);
         assert_eq!(config.api.telegram_chat_id.as_deref(), Some("12345"));
         assert!(config.indicators.enabled);
         assert_eq!(

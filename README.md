@@ -49,7 +49,7 @@ Reference target: [`yunus-0x/meridian`](https://github.com/yunus-0x/meridian)
 - [x] Jupiter swap signing/submission parity
 - [x] Agent Meridian relay transaction signing adapter for zap-in/zap-out order responses
 - [x] Meteora Rust SDK compatibility spike validates native claim/close/deploy adapter path
-- [ ] Agent Meridian / LPAgent relay support or documented replacement
+- [x] Agent Meridian / LPAgent relay support or documented replacement
 - [x] Regression tests for dry-run vs live execution guardrails
 
 ### Phase 3 — CLI and setup parity
@@ -152,6 +152,8 @@ Copy `.env.example` to `.env` for local development or to `~/.meridian/.env` for
 - `LLM_MODEL`, or per-cycle `MANAGEMENT_MODEL`, `SCREENING_MODEL`, `GENERAL_MODEL`
 
 The Rust port accepts both the nested Rust config format and the original Node.js Meridian flat `user-config.json` keys. Runtime secrets should live in `.env` or `~/.meridian/.env`; original Meridian env names such as `RPC_URL`, `OPENROUTER_API_KEY`, `LLM_MODEL`, `HELIUS_API_KEY`, `JUPITER_API_KEY`, and Telegram/Agent Meridian keys are mapped into the Rust config at startup.
+
+Agent Meridian / LPAgent mutable relay execution is documented as replaced by native Rust execution for deploy/claim/close/swap paths; read-only LPAgent analytics remain available for top-LPer study. See [`docs/agent-meridian-relay.md`](docs/agent-meridian-relay.md).
 
 **Never commit your real `user-config.json` or API keys.**
 

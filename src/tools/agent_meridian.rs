@@ -13,6 +13,7 @@ pub struct AgentMeridianSettings {
     pub base_url: String,
     pub api_key: Option<String>,
     pub agent_id: String,
+    pub lp_agent_relay_enabled: bool,
 }
 
 impl AgentMeridianSettings {
@@ -40,7 +41,29 @@ impl AgentMeridianSettings {
             base_url,
             api_key,
             agent_id,
+            lp_agent_relay_enabled: config.api.lp_agent_relay_enabled,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayReplacementStatus {
+    pub deploy_path: &'static str,
+    pub close_claim_path: &'static str,
+    pub swap_path: &'static str,
+    pub lpagent_relay_enabled_default: bool,
+    pub readonly_agent_meridian_endpoints: &'static [&'static str],
+    pub notes: &'static str,
+}
+
+pub fn relay_replacement_status() -> RelayReplacementStatus {
+    RelayReplacementStatus {
+        deploy_path: "native_meteora_sdk",
+        close_claim_path: "native_meteora_sdk",
+        swap_path: "native_jupiter",
+        lpagent_relay_enabled_default: false,
+        readonly_agent_meridian_endpoints: &["/top-lp/:pool", "/study-top-lp/:pool"],
+        notes: "Rust executes deploy/claim/close through the native Meteora SDK adapter and swaps through native Jupiter signing/submission; zap-in relay is documented as replaced. Agent Meridian remains supported for read-only LPAgent top-LPer/study endpoints and for signing stored zap-in/zap-out order payloads in tests/tools.",
     }
 }
 
@@ -268,5 +291,39 @@ mod tests {
         let err = sign_zap_out_order(&order, &keypair).expect_err("empty order should fail");
 
         assert!(err.to_string().contains("returned no transactions"));
+    }
+
+    #[test]
+    fn settings_from_config_captures_lpagent_relay_flag() {
+        let config = Config {
+            api: ApiConfig {
+                lp_agent_relay_enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let settings = AgentMeridianSettings::from_config(&config);
+
+        assert!(settings.lp_agent_relay_enabled);
+    }
+
+    #[test]
+    fn relay_replacement_status_documents_native_and_readonly_paths() {
+        let status = relay_replacement_status();
+
+        assert_eq!(status.deploy_path, "native_meteora_sdk");
+        assert_eq!(status.close_claim_path, "native_meteora_sdk");
+        assert_eq!(status.swap_path, "native_jupiter");
+        assert!(!status.lpagent_relay_enabled_default);
+        assert!(status
+            .readonly_agent_meridian_endpoints
+            .contains(&"/top-lp/:pool"));
+        assert!(status
+            .readonly_agent_meridian_endpoints
+            .contains(&"/study-top-lp/:pool"));
+        assert!(status
+            .notes
+            .contains("zap-in relay is documented as replaced"));
     }
 }

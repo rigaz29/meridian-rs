@@ -45,6 +45,11 @@
     "screeningModel": "gpt-4o-mini",
     "generalModel": "gpt-4o-mini"
   },
+  "api": {
+    "agentMeridianBase": "https://api.agentmeridian.xyz/api",
+    "agentMeridianKey": null,
+    "lpAgentRelayEnabled": false
+  },
   "dualStrategy": {
     "enabled": false,
     "primaryPct": 0.6,

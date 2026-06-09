@@ -317,6 +317,8 @@ pub struct ApiConfig {
     #[serde(default)]
     pub agent_meridian_key: Option<String>,
     #[serde(default)]
+    pub lp_agent_relay_enabled: bool,
+    #[serde(default)]
     pub telegram_bot_token: Option<String>,
     #[serde(default)]
     pub telegram_chat_id: Option<String>,
