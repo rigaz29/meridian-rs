@@ -83,12 +83,12 @@ Reference target: [`yunus-0x/meridian`](https://github.com/yunus-0x/meridian)
 
 ### Phase 6 — Control surface parity
 
-- [ ] Web UI replaces Telegram control surface for local usage
-- [ ] Live positions, balances, candidates, cycle logs, and decisions in Web UI
-- [ ] Manual screen/manage/deploy/claim/close controls in Web UI
-- [ ] Config editor in Web UI
-- [ ] Lessons/performance/blacklist views in Web UI
-- [ ] Optional Telegram notifications/commands if exact JS parity is required
+- [x] Web UI replaces Telegram control surface for local usage
+- [x] Live positions, balances, candidates, cycle logs, and decisions in Web UI
+- [x] Manual screen/manage/deploy/claim/close controls in Web UI
+- [x] Config editor in Web UI
+- [x] Lessons/performance/blacklist views in Web UI
+- [x] Optional Telegram notifications/commands intentionally deferred; Web UI is the supported replacement control surface
 
 ### Phase 7 — Production operations parity
 
