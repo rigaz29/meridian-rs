@@ -132,20 +132,23 @@ pub async fn run_management_cycle(
         return Ok("No active positions.".to_string());
     }
 
-    // ── 1. Sync positions with on-chain state ──────────────────
-    match get_my_positions(wallet_address, config).await {
-        Ok(result) => {
-            if !result.positions.is_empty() {
-                let addrs: Vec<String> = result
-                    .positions
-                    .iter()
-                    .map(|p| p.position.clone())
-                    .collect();
-                positions.sync_open_positions(addrs);
+    // ── 1. Sync positions with on-chain state (skip dry run positions) ──
+    let has_non_dry = positions.positions.values().any(|p| p.status != crate::state::positions::PositionStatus::Closed && !p.id.starts_with("DRY_"));
+    if has_non_dry && !wallet_address.is_empty() {
+        match get_my_positions(wallet_address, config).await {
+            Ok(result) => {
+                if !result.positions.is_empty() {
+                    let addrs: Vec<String> = result
+                        .positions
+                        .iter()
+                        .map(|p| p.position.clone())
+                        .collect();
+                    positions.sync_open_positions(addrs);
+                }
             }
-        }
-        Err(e) => {
-            warn("cycle", &format!("Position sync skipped: {}", e));
+            Err(e) => {
+                warn("cycle", &format!("Position sync skipped: {}", e));
+            }
         }
     }
 
@@ -158,21 +161,45 @@ pub async fn run_management_cycle(
         let mut fee_tvl: Option<f64> = None;
         let mut active_bin = 0i32;
 
-        // Fetch real PnL from Meteora API
-        if let Ok(pnl_result) =
-            crate::tools::dlmm::get_position_pnl(&p.pool_address, &p.id, wallet_address).await
-        {
-            pnl_sol = pnl_result.pnl_usd;
-            fee_tvl = pnl_result.fee_per_tvl_24h;
-            if let Some(ab) = pnl_result.active_bin {
-                active_bin = ab;
-            }
-        }
-
-        // Fallback: fetch active_bin separately if PnL didn't provide it
-        if active_bin == 0 {
+        if p.id.starts_with("DRY_") {
+            // Dry run: fetch real pool data for simulated PnL
             if let Ok(bin_result) = crate::tools::dlmm::get_active_bin(&p.pool_address).await {
                 active_bin = bin_result.bin_id;
+                let in_range = active_bin >= p.lower_bin && active_bin <= p.upper_bin;
+                if in_range {
+                    // Estimate PnL from pool fee rate (simplified)
+                    let elapsed_hrs = {
+                        let now = chrono::Utc::now();
+                        let created = chrono::DateTime::parse_from_rfc3339(&p.created_at)
+                            .map(|dt| dt.with_timezone(&chrono::Utc))
+                            .unwrap_or(now);
+                        (now - created).num_minutes() as f64 / 60.0
+                    };
+                    // Use a conservative 0.5% per hour estimate for in-range positions
+                    pnl_sol = Some(p.amount_sol * 0.005 * elapsed_hrs.min(24.0));
+                    fee_tvl = Some(0.5);
+                } else {
+                    // Out of range: slightly negative PnL (impermanent loss simulation)
+                    pnl_sol = Some(-p.amount_sol * 0.01);
+                    fee_tvl = Some(0.0);
+                }
+            }
+        } else {
+            // Real position: fetch from Meteora API
+            if let Ok(pnl_result) =
+                crate::tools::dlmm::get_position_pnl(&p.pool_address, &p.id, wallet_address).await
+            {
+                pnl_sol = pnl_result.pnl_usd;
+                fee_tvl = pnl_result.fee_per_tvl_24h;
+                if let Some(ab) = pnl_result.active_bin {
+                    active_bin = ab;
+                }
+            }
+            // Fallback: fetch active_bin separately if PnL didn't provide it
+            if active_bin == 0 {
+                if let Ok(bin_result) = crate::tools::dlmm::get_active_bin(&p.pool_address).await {
+                    active_bin = bin_result.bin_id;
+                }
             }
         }
 

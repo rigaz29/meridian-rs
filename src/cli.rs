@@ -1304,30 +1304,69 @@ pub async fn run_cli_command(
             if dry_run {
                 effective_config.dry_run = true;
             }
-            json_command_result(
-                "deploy",
-                deploy_position(
-                    &pool,
+            let result = deploy_position(
+                &pool,
+                amount_sol,
+                bins_below,
+                bins_above,
+                strategy.as_deref(),
+                &effective_config,
+            ).await?;
+
+            // Track dry run positions
+            if result.success && result.position.as_deref().map_or(false, |id| id.starts_with("DRY_")) {
+                let pos_id = result.position.clone().unwrap();
+                let mut positions = crate::state::positions::PositionState::load(state_path)?;
+                let tracked = crate::state::positions::TrackedPosition {
+                    id: pos_id.clone(),
+                    pool_address: result.pool.clone().unwrap_or_default(),
+                    pool_name: result.pool_name.clone(),
+                    base_mint: String::new(),
+                    base_symbol: None,
+                    lower_bin: result.bin_range.as_ref().map(|r| r.min).unwrap_or(0),
+                    upper_bin: result.bin_range.as_ref().map(|r| r.max).unwrap_or(0),
                     amount_sol,
-                    bins_below,
-                    bins_above,
-                    strategy.as_deref(),
-                    &effective_config,
-                )
-                .await?,
-            )
+                    status: crate::state::positions::PositionStatus::Active,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    note: Some("DRY RUN — simulated position".to_string()),
+                    ..Default::default()
+                };
+                positions.add(tracked);
+                positions.save(state_path)?;
+            }
+
+            json_command_result("deploy", result)
         }
         CliCommand::Claim { position } => {
-            json_command_result("claim", claim_fees(&position, config).await?)
+            let result = claim_fees(&position, config).await?;
+            // Update fees claimed for dry run positions
+            if result.success && position.starts_with("DRY_") {
+                let mut positions = crate::state::positions::PositionState::load(state_path)?;
+                if let Some(pos) = positions.positions.get_mut(&position) {
+                    pos.total_fees_claimed += pos.amount_sol * 0.005; // estimated
+                    pos.last_fee_claim_at = Some(chrono::Utc::now().to_rfc3339());
+                    positions.save(state_path)?;
+                }
+            }
+            json_command_result("claim", result)
         }
         CliCommand::Close {
             position,
             reason,
             skip_swap: _,
-        } => json_command_result(
-            "close",
-            close_position(&position, reason.as_deref(), config).await?,
-        ),
+        } => {
+            let result = close_position(&position, reason.as_deref(), config).await?;
+            // Close dry run positions in state
+            if result.success && position.starts_with("DRY_") {
+                let mut positions = crate::state::positions::PositionState::load(state_path)?;
+                if let Some(pos) = positions.positions.get_mut(&position) {
+                    pos.status = crate::state::positions::PositionStatus::Closed;
+                    pos.note = Some(format!("DRY RUN — closed ({})", reason.as_deref().unwrap_or("manual")));
+                    positions.save(state_path)?;
+                }
+            }
+            json_command_result("close", result)
+        }
         CliCommand::Swap { mint, amount } => {
             json_command_result("swap", swap_token(&mint, amount, 50, 100, config).await?)
         }
@@ -2108,7 +2147,7 @@ mod tests {
 
         assert_eq!(parsed["success"], true);
         assert_eq!(parsed["command"], "deploy");
-        assert_eq!(parsed["data"]["success"], false);
+        assert_eq!(parsed["data"]["success"], true);
         assert_eq!(parsed["data"]["pool"], "Pool111");
         assert!(parsed["data"]["note"]
             .as_str()

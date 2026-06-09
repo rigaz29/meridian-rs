@@ -796,27 +796,58 @@ pub async fn deploy_position(
     if is_dry_run(config) {
         let bins_below_val = bins_below.unwrap_or(DEFAULT_BINS_BELOW);
         let bins_above_val = bins_above.unwrap_or(0);
+        let is_wide_range = bins_below_val + bins_above_val > 69;
+
+        // Fetch real pool data for realistic dry run
+        let active_bin = get_active_bin(&pool_address)
+            .await
+            .unwrap_or(ActiveBinInfo {
+                bin_id: 0,
+                price: 0.0,
+                price_per_lamport: None,
+            });
+        let pool_meta = get_pool_metadata(&pool_address).await;
+        let bin_step = pool_meta
+            .as_ref()
+            .and_then(|m| m.extra.get("bin_step"))
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+        let base_fee = pool_meta
+            .as_ref()
+            .and_then(|m| m.extra.get("base_fee_percentage"))
+            .and_then(|v| v.as_f64());
+        let min_bin_id = active_bin.bin_id - bins_below_val as i32;
+        let max_bin_id = if bins_above_val > 0 {
+            active_bin.bin_id + bins_above_val as i32
+        } else {
+            active_bin.bin_id
+        };
+
+        // Generate a dry run position ID
+        let dry_id = format!("DRY_{}_{}", &pool_address[..8.min(pool_address.len())], chrono::Utc::now().timestamp());
+        let pool_name = pool_meta.as_ref().and_then(|m| m.name.clone());
+
         return Ok(DeployResult {
-            success: false,
-            position: None,
+            success: true,
+            position: Some(dry_id),
             pool: Some(pool_address),
-            pool_name: None,
+            pool_name,
             bin_range: Some(BinRange {
-                min: 0,
-                max: 0,
-                active: None,
+                min: min_bin_id,
+                max: max_bin_id,
+                active: Some(active_bin.bin_id),
             }),
             price_range: None,
-            bin_step: None,
-            base_fee: None,
+            bin_step,
+            base_fee,
             strategy: strategy.map(String::from),
-            wide_range: Some(bins_below_val + bins_above_val > 69),
+            wide_range: Some(is_wide_range),
             amount_x: Some(0.0),
             amount_y: Some(amount_sol),
             txs: None,
             error: None,
             note: Some(format!(
-                "DRY RUN — would deploy {:.4} SOL with {} bins below, {} bins above",
+                "DRY RUN — simulated deploy {:.4} SOL with {} bins below, {} bins above (live pool data)",
                 amount_sol, bins_below_val, bins_above_val,
             )),
         });
@@ -947,7 +978,7 @@ pub async fn close_position(
 
     if is_dry_run(config) {
         return Ok(CloseResult {
-            success: false,
+            success: true,
             position: Some(position_address),
             pool: None,
             pool_name: None,
@@ -957,7 +988,7 @@ pub async fn close_position(
             pnl_usd: None,
             pnl_pct: None,
             base_mint: None,
-            error: Some("DRY RUN — no transaction sent".to_string()),
+            error: None,
         });
     }
 
@@ -1021,11 +1052,11 @@ pub async fn claim_fees(position_address: &str, config: &Config) -> Result<Claim
 
     if is_dry_run(config) {
         return Ok(ClaimResult {
-            success: false,
+            success: true,
             position: Some(position_address),
             txs: None,
             base_mint: None,
-            error: Some("DRY RUN — no transaction sent".to_string()),
+            error: None,
         });
     }
 
@@ -1357,7 +1388,7 @@ mod tests {
         let deploy = deploy_position(pool, 0.5, Some(35), Some(0), Some("bid_ask"), &config)
             .await
             .expect("dry-run deploy should not error");
-        assert!(!deploy.success);
+        assert!(deploy.success);
         assert_eq!(deploy.pool.as_deref(), Some(pool));
         assert!(deploy
             .note
@@ -1368,22 +1399,14 @@ mod tests {
         let close = close_position(position, Some("test dry-run"), &config)
             .await
             .expect("dry-run close should not error");
-        assert!(!close.success);
+        assert!(close.success);
         assert_eq!(close.position.as_deref(), Some(position));
-        assert_eq!(
-            close.error.as_deref(),
-            Some("DRY RUN — no transaction sent")
-        );
 
         let claim = claim_fees(position, &config)
             .await
             .expect("dry-run claim should not error");
-        assert!(!claim.success);
+        assert!(claim.success);
         assert_eq!(claim.position.as_deref(), Some(position));
-        assert_eq!(
-            claim.error.as_deref(),
-            Some("DRY RUN — no transaction sent")
-        );
     }
 
     #[tokio::test]
