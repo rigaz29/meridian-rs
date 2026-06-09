@@ -12,6 +12,29 @@ pub fn get_all_tool_definitions() -> Vec<ToolDefinition> {
             }),
         ),
         tool(
+            "get_recent_decisions",
+            "Get recent decisions from decision-log.json so the agent avoids repeating actions",
+            json!({
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Maximum recent decisions to return (default 5)"}
+                },
+                "required": []
+            }),
+        ),
+        tool(
+            "get_performance_history",
+            "Retrieve recent closed-position performance history with PnL, fees, range efficiency, and close reasons",
+            json!({
+                "type": "object",
+                "properties": {
+                    "hours": {"type": "number", "description": "How many hours back to look (default 24; use 168 for 7 days)"},
+                    "limit": {"type": "integer", "description": "Maximum closed positions to return (default 50)"}
+                },
+                "required": []
+            }),
+        ),
+        tool(
             "get_my_positions",
             "Get all open DLMM positions for the wallet",
             json!({
@@ -46,11 +69,14 @@ pub fn get_all_tool_definitions() -> Vec<ToolDefinition> {
         ),
         tool(
             "close_position",
-            "Close a DLMM position and withdraw liquidity",
+            "Close a DLMM position and withdraw liquidity; auto-swaps base token to SOL unless skip_swap is true",
             json!({
                 "type": "object",
                 "properties": {
-                    "position_id": {"type": "string", "description": "The position ID to close"}
+                    "position_id": {"type": "string", "description": "The tracked position ID to close"},
+                    "position_address": {"type": "string", "description": "The DLMM position address to close (alternative to position_id)"},
+                    "reason": {"type": "string", "description": "Reason for closing, used for audit/pool-memory notes"},
+                    "skip_swap": {"type": "boolean", "description": "If true, skip automatic base-token swap back to SOL after close"}
                 },
                 "required": ["position_id"]
             }),
@@ -212,6 +238,58 @@ pub fn get_all_tool_definitions() -> Vec<ToolDefinition> {
             }),
         ),
         tool(
+            "add_strategy",
+            "Save a new LP strategy to the strategy library after parsing strategy text or user instructions",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Short slug e.g. overnight_classic_bid_ask or panda_strat"},
+                    "name": {"type": "string", "description": "Human-readable strategy name"},
+                    "author": {"type": "string", "description": "Strategy author or source"},
+                    "lp_strategy": {"type": "string", "enum": ["bid_ask", "spot", "curve", "any", "mixed"], "description": "LP strategy type"},
+                    "token_criteria": {"type": "object", "description": "Token selection criteria and notes"},
+                    "entry": {"type": "object", "description": "Entry conditions"},
+                    "range": {"type": "object", "description": "Bin range / distribution guidance"},
+                    "exit": {"type": "object", "description": "Exit rules"},
+                    "best_for": {"type": "string", "description": "Ideal market conditions"},
+                    "raw": {"type": "string", "description": "Original tweet or text"}
+                },
+                "required": ["id", "name"]
+            }),
+        ),
+        tool(
+            "list_strategies",
+            "List saved LP strategies and show which one is active",
+            json!({"type": "object", "properties": {}, "required": []}),
+        ),
+        tool(
+            "get_strategy",
+            "Get full details for a saved LP strategy",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "string", "description": "Strategy ID"}},
+                "required": ["id"]
+            }),
+        ),
+        tool(
+            "set_active_strategy",
+            "Set which saved strategy should guide the next screening/deployment cycle",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "string", "description": "Strategy ID to activate"}},
+                "required": ["id"]
+            }),
+        ),
+        tool(
+            "remove_strategy",
+            "Remove a strategy from the library",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "string", "description": "Strategy ID to remove"}},
+                "required": ["id"]
+            }),
+        ),
+        tool(
             "update_config",
             "Update a bot configuration parameter at runtime. Self-tuning.",
             json!({
@@ -268,5 +346,87 @@ fn tool(name: &str, desc: &str, params: serde_json::Value) -> ToolDefinition {
             description: desc.to_string(),
             parameters: params,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recent_decisions_tool_is_defined_with_limit_parameter() {
+        let tools = get_all_tool_definitions();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.function.name == "get_recent_decisions")
+            .expect("get_recent_decisions should be exposed as an LLM tool");
+
+        assert!(tool
+            .function
+            .description
+            .to_ascii_lowercase()
+            .contains("recent decisions"));
+        assert_eq!(
+            tool.function.parameters["properties"]["limit"]["type"],
+            "integer"
+        );
+        assert_eq!(
+            tool.function.parameters["required"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn performance_history_tool_is_defined_with_hours_and_limit_parameters() {
+        let tools = get_all_tool_definitions();
+        let tool = tools
+            .iter()
+            .find(|tool| tool.function.name == "get_performance_history")
+            .expect("get_performance_history should be exposed as an LLM tool");
+
+        assert!(tool
+            .function
+            .description
+            .to_ascii_lowercase()
+            .contains("performance"));
+        assert_eq!(
+            tool.function.parameters["properties"]["hours"]["type"],
+            "number"
+        );
+        assert_eq!(
+            tool.function.parameters["properties"]["limit"]["type"],
+            "integer"
+        );
+    }
+
+    #[test]
+    fn strategy_library_tools_are_defined_for_llm_use() {
+        let tools = get_all_tool_definitions();
+        for name in [
+            "add_strategy",
+            "list_strategies",
+            "get_strategy",
+            "set_active_strategy",
+            "remove_strategy",
+        ] {
+            assert!(
+                tools.iter().any(|tool| tool.function.name == name),
+                "{name} should be exposed as an LLM tool"
+            );
+        }
+
+        let add = tools
+            .iter()
+            .find(|tool| tool.function.name == "add_strategy")
+            .expect("add_strategy should exist");
+        assert_eq!(add.function.parameters["required"][0], "id");
+        assert_eq!(add.function.parameters["required"][1], "name");
+        assert_eq!(
+            add.function.parameters["properties"]["lp_strategy"]["enum"][0],
+            "bid_ask"
+        );
     }
 }

@@ -12,6 +12,8 @@ pub fn get_tools_for_role(role: &AgentRole, goal: &str) -> Vec<String> {
 }
 
 static MANAGER_TOOLS: &[&str] = &[
+    "get_recent_decisions",
+    "get_performance_history",
     "close_position",
     "claim_fees",
     "swap_token",
@@ -21,6 +23,8 @@ static MANAGER_TOOLS: &[&str] = &[
 ];
 
 static SCREENER_TOOLS: &[&str] = &[
+    "get_recent_decisions",
+    "get_performance_history",
     "deploy_position",
     "get_active_bin",
     "get_top_candidates",
@@ -32,6 +36,14 @@ static SCREENER_TOOLS: &[&str] = &[
     "get_pool_memory",
     "get_wallet_balance",
     "get_my_positions",
+];
+
+static STRATEGY_TOOLS: &[&str] = &[
+    "list_strategies",
+    "get_strategy",
+    "add_strategy",
+    "set_active_strategy",
+    "remove_strategy",
 ];
 
 struct IntentPattern {
@@ -57,7 +69,7 @@ static INTENT_MAP: &[IntentPattern] = &[
             "get_my_positions",
             "add_pool_note",
         ],
-        pattern: r"(?i)(deploy|open|add liquidity|lp into|invest in)",
+        pattern: r"(?i)\b(deploy|open|add liquidity|lp into|invest in)\b",
     },
     IntentPattern {
         intent: "close",
@@ -68,7 +80,7 @@ static INTENT_MAP: &[IntentPattern] = &[
             "get_wallet_balance",
             "swap_token",
         ],
-        pattern: r"(?i)(close|exit|withdraw|remove liquidity|shut down)",
+        pattern: r"(?i)\b(close|exit|withdraw|remove liquidity|shut down)\b",
     },
     IntentPattern {
         intent: "claim",
@@ -78,22 +90,27 @@ static INTENT_MAP: &[IntentPattern] = &[
             "get_position_pnl",
             "get_wallet_balance",
         ],
-        pattern: r"(?i)(claim|harvest|collect).*fee",
+        pattern: r"(?i)\b(claim|harvest|collect)\b.*\bfee",
     },
     IntentPattern {
         intent: "swap",
         tools: &["swap_token", "get_wallet_balance"],
-        pattern: r"(?i)(swap|convert|sell|exchange)",
+        pattern: r"(?i)\b(swap|convert|sell|exchange)\b",
     },
     IntentPattern {
         intent: "balance",
         tools: &["get_wallet_balance", "get_my_positions"],
-        pattern: r"(?i)(balance|wallet|sol|how much)",
+        pattern: r"(?i)\b(balance|wallet|sol|how much)\b",
     },
     IntentPattern {
         intent: "positions",
         tools: &["get_my_positions", "get_position_pnl", "get_wallet_balance"],
-        pattern: r"(?i)(position|portfolio|open|pnl|yield|range)",
+        pattern: r"(?i)\b(position|portfolio|open|pnl|yield|range)\b",
+    },
+    IntentPattern {
+        intent: "strategy",
+        tools: STRATEGY_TOOLS,
+        pattern: r"(?i)\b(strategy|strategies|active strategy|lp strat)\b",
     },
     IntentPattern {
         intent: "screen",
@@ -107,12 +124,12 @@ static INTENT_MAP: &[IntentPattern] = &[
             "get_my_positions",
             "discover_pools",
         ],
-        pattern: r"(?i)(screen|candidate|find pool|search|research|token)",
+        pattern: r"(?i)\b(screen|candidate|find pool|search|research|token)\b",
     },
     IntentPattern {
         intent: "memory",
         tools: &["get_pool_memory", "add_pool_note"],
-        pattern: r"(?i)(memory|pool history|note|remember)",
+        pattern: r"(?i)\b(memory|pool history|note|remember)\b",
     },
 ];
 
@@ -132,6 +149,8 @@ fn get_general_tools(goal: &str) -> Vec<String> {
     if matched.is_empty() {
         // Fallback: all non-destructive tools
         return vec![
+            "get_recent_decisions",
+            "get_performance_history",
             "get_wallet_balance",
             "get_my_positions",
             "get_position_pnl",
@@ -150,5 +169,58 @@ fn get_general_tools(goal: &str) -> Vec<String> {
         .collect();
     }
 
+    matched.insert("get_recent_decisions".to_string());
+    matched.insert("get_performance_history".to_string());
     matched.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recent_decisions_tool_is_available_to_all_agent_roles() {
+        for role in [AgentRole::Manager, AgentRole::Screener, AgentRole::General] {
+            let tools = get_tools_for_role(&role, "general status check");
+            assert!(
+                tools.iter().any(|tool| tool == "get_recent_decisions"),
+                "role {:?} should include get_recent_decisions; tools={:?}",
+                role,
+                tools
+            );
+        }
+    }
+
+    #[test]
+    fn performance_history_tool_is_available_to_all_agent_roles() {
+        for role in [AgentRole::Manager, AgentRole::Screener, AgentRole::General] {
+            let tools = get_tools_for_role(&role, "show recent performance history");
+            assert!(
+                tools.iter().any(|tool| tool == "get_performance_history"),
+                "role {:?} should include get_performance_history; tools={:?}",
+                role,
+                tools
+            );
+        }
+    }
+
+    #[test]
+    fn strategy_tools_are_available_for_general_strategy_intent() {
+        let tools = get_tools_for_role(
+            &AgentRole::General,
+            "list strategies and set active strategy to panda strat",
+        );
+        for name in [
+            "list_strategies",
+            "get_strategy",
+            "add_strategy",
+            "set_active_strategy",
+            "remove_strategy",
+        ] {
+            assert!(
+                tools.iter().any(|tool| tool == name),
+                "general strategy intent should include {name}; tools={tools:?}"
+            );
+        }
+    }
 }

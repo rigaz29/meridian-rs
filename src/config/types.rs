@@ -8,6 +8,9 @@ pub struct Config {
     pub risk: RiskConfig,
     pub schedule: ScheduleConfig,
     pub llm: LlmConfig,
+    #[serde(default)]
+    pub dry_run: bool,
+    #[serde(default)]
     pub strategy: StrategyConfig,
     #[serde(default)]
     pub dual_strategy: DualStrategyConfig,
@@ -19,6 +22,8 @@ pub struct Config {
     pub jupiter: JupiterConfig,
     #[serde(default)]
     pub indicators: IndicatorsConfig,
+    #[serde(default)]
+    pub darwin: DarwinConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,11 +69,21 @@ pub struct ScreeningConfig {
     pub discord_signal_mode: Option<String>,
 }
 
-fn default_min_quote_organic() -> f64 { 0.0 }
-fn default_timeframe() -> String { "1h".to_string() }
-fn default_category() -> String { "trending".to_string() }
-fn default_max_bot_holders() -> f64 { 30.0 }
-fn default_max_top10() -> f64 { 60.0 }
+fn default_min_quote_organic() -> f64 {
+    0.0
+}
+fn default_timeframe() -> String {
+    "1h".to_string()
+}
+fn default_category() -> String {
+    "trending".to_string()
+}
+fn default_max_bot_holders() -> f64 {
+    30.0
+}
+fn default_max_top10() -> f64 {
+    60.0
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,14 +120,30 @@ pub struct ManagementConfig {
     pub sol_mode: bool,
 }
 
-fn default_management_interval() -> u32 { 10 }
-fn default_screening_interval() -> u32 { 30 }
-fn default_trailing_trigger_pct() -> f64 { 5.0 }
-fn default_trailing_drop_pct() -> f64 { 3.0 }
-fn default_min_claim_amount() -> f64 { 0.01 }
-fn default_min_fee_per_tvl_24h() -> f64 { 0.0005 }
-fn default_min_age_before_yield_check() -> u32 { 60 }
-fn default_out_of_range_bins_to_close() -> i32 { 50 }
+fn default_management_interval() -> u32 {
+    10
+}
+fn default_screening_interval() -> u32 {
+    30
+}
+fn default_trailing_trigger_pct() -> f64 {
+    5.0
+}
+fn default_trailing_drop_pct() -> f64 {
+    3.0
+}
+fn default_min_claim_amount() -> f64 {
+    0.01
+}
+fn default_min_fee_per_tvl_24h() -> f64 {
+    0.0005
+}
+fn default_min_age_before_yield_check() -> u32 {
+    60
+}
+fn default_out_of_range_bins_to_close() -> i32 {
+    50
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -127,8 +158,12 @@ pub struct RiskConfig {
     pub cooldown_duration_min: u32,
 }
 
-fn default_cooldown_loss() -> f64 { -5.0 }
-fn default_cooldown_duration() -> u32 { 60 }
+fn default_cooldown_loss() -> f64 {
+    -5.0
+}
+fn default_cooldown_duration() -> u32 {
+    60
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -141,8 +176,12 @@ pub struct ScheduleConfig {
     pub sync_interval_min: u32,
 }
 
-fn default_pnl_poll_interval() -> u32 { 30 }
-fn default_sync_interval() -> u32 { 5 }
+fn default_pnl_poll_interval() -> u32 {
+    30
+}
+fn default_sync_interval() -> u32 {
+    5
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -162,10 +201,18 @@ pub struct LlmConfig {
     pub max_steps: u32,
 }
 
-fn default_base_url() -> String { "https://openrouter.ai/api/v1".to_string() }
-fn default_temperature() -> f32 { 0.7 }
-fn default_max_tokens() -> u32 { 4096 }
-fn default_max_steps() -> u32 { 20 }
+fn default_base_url() -> String {
+    "https://openrouter.ai/api/v1".to_string()
+}
+fn default_temperature() -> f32 {
+    0.7
+}
+fn default_max_tokens() -> u32 {
+    4096
+}
+fn default_max_steps() -> u32 {
+    20
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -176,7 +223,19 @@ pub struct StrategyConfig {
     pub min_safe_bins_below: u32,
 }
 
-fn default_min_safe_bins() -> u32 { 35 }
+fn default_min_safe_bins() -> u32 {
+    35
+}
+
+impl Default for StrategyConfig {
+    fn default() -> Self {
+        Self {
+            min_bins_below: 15,
+            max_bins_below: 50,
+            min_safe_bins_below: 35,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -207,8 +266,12 @@ pub struct TokensConfig {
     pub usdc_mint: String,
 }
 
-fn default_sol_mint() -> String { "So11111111111111111111111111111111111111112".to_string() }
-fn default_usdc_mint() -> String { "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string() }
+fn default_sol_mint() -> String {
+    "So11111111111111111111111111111111111111112".to_string()
+}
+fn default_usdc_mint() -> String {
+    "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -238,7 +301,9 @@ pub struct JupiterConfig {
     pub api_key: Option<String>,
 }
 
-fn default_referral_fee_bps() -> u32 { 50 }
+fn default_referral_fee_bps() -> u32 {
+    50
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -247,6 +312,67 @@ pub struct IndicatorsConfig {
     pub enabled: bool,
     #[serde(default)]
     pub presets: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DarwinConfig {
+    #[serde(default = "default_darwin_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_darwin_window_days")]
+    pub window_days: u64,
+    #[serde(default = "default_darwin_recalc_every")]
+    pub recalc_every: u64,
+    #[serde(default = "default_darwin_boost_factor")]
+    pub boost_factor: f64,
+    #[serde(default = "default_darwin_decay_factor")]
+    pub decay_factor: f64,
+    #[serde(default = "default_darwin_weight_floor")]
+    pub weight_floor: f64,
+    #[serde(default = "default_darwin_weight_ceiling")]
+    pub weight_ceiling: f64,
+    #[serde(default = "default_darwin_min_samples")]
+    pub min_samples: u64,
+}
+
+impl Default for DarwinConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_darwin_enabled(),
+            window_days: default_darwin_window_days(),
+            recalc_every: default_darwin_recalc_every(),
+            boost_factor: default_darwin_boost_factor(),
+            decay_factor: default_darwin_decay_factor(),
+            weight_floor: default_darwin_weight_floor(),
+            weight_ceiling: default_darwin_weight_ceiling(),
+            min_samples: default_darwin_min_samples(),
+        }
+    }
+}
+
+fn default_darwin_enabled() -> bool {
+    true
+}
+fn default_darwin_window_days() -> u64 {
+    60
+}
+fn default_darwin_recalc_every() -> u64 {
+    5
+}
+fn default_darwin_boost_factor() -> f64 {
+    1.05
+}
+fn default_darwin_decay_factor() -> f64 {
+    0.95
+}
+fn default_darwin_weight_floor() -> f64 {
+    0.3
+}
+fn default_darwin_weight_ceiling() -> f64 {
+    2.5
+}
+fn default_darwin_min_samples() -> u64 {
+    10
 }
 
 impl Default for Config {
@@ -319,6 +445,7 @@ impl Default for Config {
                 max_tokens: 4096,
                 max_steps: 20,
             },
+            dry_run: false,
             strategy: StrategyConfig {
                 min_bins_below: 15,
                 max_bins_below: 50,
@@ -329,6 +456,36 @@ impl Default for Config {
             api: ApiConfig::default(),
             jupiter: JupiterConfig::default(),
             indicators: IndicatorsConfig::default(),
+            darwin: DarwinConfig::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn parses_example_config_without_explicit_strategy() {
+        let raw = include_str!("../../user-config.example.json");
+        let config: Config = serde_json::from_str(raw).expect("example config should parse");
+
+        assert_eq!(config.strategy.min_bins_below, 15);
+        assert_eq!(config.strategy.max_bins_below, 50);
+        assert_eq!(config.strategy.min_safe_bins_below, 35);
+    }
+
+    #[test]
+    fn default_config_enables_darwin_signal_weighting() {
+        let config = Config::default();
+
+        assert!(config.darwin.enabled);
+        assert_eq!(config.darwin.window_days, 60);
+        assert_eq!(config.darwin.recalc_every, 5);
+        assert_eq!(config.darwin.boost_factor, 1.05);
+        assert_eq!(config.darwin.decay_factor, 0.95);
+        assert_eq!(config.darwin.weight_floor, 0.3);
+        assert_eq!(config.darwin.weight_ceiling, 2.5);
+        assert_eq!(config.darwin.min_samples, 10);
     }
 }

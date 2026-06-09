@@ -164,10 +164,7 @@ pub async fn get_token_info(mint: &str) -> Result<TokenInfo> {
         .context("Token search API request failed")?;
 
     if !resp.status().is_success() {
-        return Err(anyhow::anyhow!(
-            "Token search API error: {}",
-            resp.status()
-        ));
+        return Err(anyhow::anyhow!("Token search API error: {}", resp.status()));
     }
 
     let data: Vec<JupiterSearchResult> = resp
@@ -257,8 +254,7 @@ pub async fn get_token_holders(mint: &str, limit: usize) -> Result<TokenHoldersR
     let total_supply = if let Ok(resp) = token_resp {
         if resp.status().is_success() {
             let arr: Vec<JupiterSearchResult> = resp.json().await.unwrap_or_default();
-            arr.first()
-                .and_then(|t| t.total_supply.or(t.circ_supply))
+            arr.first().and_then(|t| t.total_supply.or(t.circ_supply))
         } else {
             None
         }
@@ -361,10 +357,7 @@ pub async fn get_token_narrative(mint: &str) -> Result<TokenNarrative> {
         .context("Narrative API request failed")?;
 
     if !resp.status().is_success() {
-        return Err(anyhow::anyhow!(
-            "Narrative API error: {}",
-            resp.status()
-        ));
+        return Err(anyhow::anyhow!("Narrative API error: {}", resp.status()));
     }
 
     #[derive(Deserialize)]
@@ -373,7 +366,10 @@ pub async fn get_token_narrative(mint: &str) -> Result<TokenNarrative> {
         status: Option<String>,
     }
 
-    let raw: NarrativeRaw = resp.json().await.context("Failed to parse narrative response")?;
+    let raw: NarrativeRaw = resp
+        .json()
+        .await
+        .context("Failed to parse narrative response")?;
 
     let result = TokenNarrative {
         mint: mint.to_string(),
@@ -554,10 +550,7 @@ async fn fetch_wallet_positions(
         name: Option<String>,
     }
 
-    let rpc: RpcResponse = resp
-        .json()
-        .await
-        .context("Failed to parse RPC response")?;
+    let rpc: RpcResponse = resp.json().await.context("Failed to parse RPC response")?;
 
     if let Some(err) = rpc.error {
         return Err(anyhow::anyhow!("RPC error: {}", err));

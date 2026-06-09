@@ -7,7 +7,8 @@ pub async fn send_message(bot_token: &str, chat_id: &str, text: &str) -> Result<
     let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
     let client = Client::new();
 
-    let resp = client.post(&url)
+    let resp = client
+        .post(&url)
         .json(&json!({
             "chat_id": chat_id,
             "text": text,
@@ -33,7 +34,8 @@ pub async fn send_message_safe(bot_token: &str, chat_id: &str, text: &str) -> Re
             // Retry without markdown
             let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);
             let client = Client::new();
-            client.post(&url)
+            client
+                .post(&url)
                 .json(&json!({
                     "chat_id": chat_id,
                     "text": text,

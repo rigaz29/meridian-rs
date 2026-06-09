@@ -22,16 +22,12 @@ const TRAILING_EXIT_WINDOW_MS: i64 = 30_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum PositionStatus {
+    #[default]
     Active,
     OutOfRange,
     Closed,
-}
-
-impl Default for PositionStatus {
-    fn default() -> Self {
-        PositionStatus::Active
-    }
 }
 
 // ─── Trailing TP Types ──────────────────────────────────────────
@@ -335,7 +331,7 @@ impl PositionState {
     /// Pass None to clear. Returns true if position exists.
     pub fn set_instruction(&mut self, id: &str, text: Option<&str>) -> bool {
         if let Some(p) = self.positions.get_mut(id) {
-            p.instruction = text.and_then(|t| Self::sanitize_stored_text(t));
+            p.instruction = text.and_then(Self::sanitize_stored_text);
             self.last_updated = Some(Utc::now().to_rfc3339());
             true
         } else {

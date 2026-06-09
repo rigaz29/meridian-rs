@@ -137,8 +137,7 @@ impl SmartWalletStore {
         let path = Self::data_dir().join(WALLETS_FILE);
         let json =
             serde_json::to_string_pretty(self).context("Failed to serialize wallet store")?;
-        fs::write(&path, &json)
-            .with_context(|| format!("Failed to write {}", path.display()))?;
+        fs::write(&path, &json).with_context(|| format!("Failed to write {}", path.display()))?;
         Ok(())
     }
 
@@ -328,7 +327,11 @@ async fn fetch_positions_cached(
         Err(e) => {
             module::warn(
                 "smart_wallets",
-                &format!("Failed to fetch positions for {}: {}", &wallet_address[..8.min(wallet_address.len())], e),
+                &format!(
+                    "Failed to fetch positions for {}: {}",
+                    &wallet_address[..8.min(wallet_address.len())],
+                    e
+                ),
             );
             vec![]
         }
@@ -408,10 +411,7 @@ async fn fetch_wallet_positions(
         name: Option<String>,
     }
 
-    let rpc: RpcResponse = resp
-        .json()
-        .await
-        .context("Failed to parse RPC response")?;
+    let rpc: RpcResponse = resp.json().await.context("Failed to parse RPC response")?;
 
     if let Some(err) = rpc.error {
         return Err(anyhow::anyhow!("RPC error: {}", err));

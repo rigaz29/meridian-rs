@@ -1,5 +1,9 @@
 use anyhow::{anyhow, Result};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
+use solana_sdk::signature::{Keypair, Signature};
+use solana_sdk::signer::Signer;
+use solana_sdk::transaction::{Transaction, VersionedTransaction};
 
 use crate::config::Config;
 
@@ -18,8 +22,92 @@ const JUPITER_SWAP_V2_API: &str = "https://api.jup.ag/swap/v2";
 /// Default referral account (configurable via config.jupiter.referralAccount).
 const DEFAULT_REFERRAL_ACCOUNT: &str = "";
 
-/// Default referral fee in basis points.
-const DEFAULT_REFERRAL_FEE_BPS: u32 = 50;
+pub fn load_keypair_from_secret(secret: &str) -> Result<Keypair> {
+    let trimmed = secret.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("wallet private key is empty");
+    }
+
+    let bytes = if trimmed.starts_with('[') {
+        serde_json::from_str::<Vec<u8>>(trimmed)
+            .map_err(|e| anyhow!("failed to parse wallet private key JSON array: {}", e))?
+    } else {
+        bs58::decode(trimmed)
+            .into_vec()
+            .map_err(|e| anyhow!("failed to decode wallet private key as base58: {}", e))?
+    };
+
+    if bytes.len() != 64 {
+        anyhow::bail!(
+            "wallet private key must decode to 64 bytes, got {} bytes",
+            bytes.len()
+        );
+    }
+
+    Keypair::try_from(bytes.as_slice())
+        .map_err(|e| anyhow!("invalid wallet private key bytes: {}", e))
+}
+
+pub fn load_keypair_from_env() -> Result<Keypair> {
+    let secret = ["WALLET_PRIVATE_KEY", "MERIDIAN_WALLET_PRIVATE_KEY"]
+        .iter()
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .ok_or_else(|| anyhow!("WALLET_PRIVATE_KEY is not set"))?;
+
+    load_keypair_from_secret(&secret)
+}
+
+pub fn sign_message(keypair: &Keypair, message: &[u8]) -> Signature {
+    keypair.sign_message(message)
+}
+
+fn sign_versioned_transaction(
+    unsigned: VersionedTransaction,
+    keypair: &Keypair,
+) -> Result<VersionedTransaction> {
+    VersionedTransaction::try_new(unsigned.message, &[keypair])
+        .map_err(|e| anyhow!("failed to sign versioned transaction: {}", e))
+}
+
+fn sign_legacy_transaction(mut unsigned: Transaction, keypair: &Keypair) -> Result<Transaction> {
+    let recent_blockhash = unsigned.message.recent_blockhash;
+    unsigned
+        .try_partial_sign(&[keypair], recent_blockhash)
+        .map_err(|e| anyhow!("failed to sign legacy transaction: {}", e))?;
+    Ok(unsigned)
+}
+
+pub fn sign_serialized_transaction_base64(
+    unsigned_transaction: &str,
+    keypair: &Keypair,
+) -> Result<String> {
+    let transaction_bytes = BASE64_STANDARD
+        .decode(unsigned_transaction.trim())
+        .map_err(|e| anyhow!("failed to decode transaction as base64: {}", e))?;
+
+    if let Ok(unsigned) = bincode::deserialize::<VersionedTransaction>(&transaction_bytes) {
+        let signed = sign_versioned_transaction(unsigned, keypair)?;
+        let signed_bytes = bincode::serialize(&signed)
+            .map_err(|e| anyhow!("failed to serialize signed versioned transaction: {}", e))?;
+        return Ok(BASE64_STANDARD.encode(signed_bytes));
+    }
+
+    let unsigned: Transaction = bincode::deserialize(&transaction_bytes)
+        .map_err(|e| anyhow!("failed to deserialize transaction: {}", e))?;
+    let signed = sign_legacy_transaction(unsigned, keypair)?;
+    let signed_bytes = bincode::serialize(&signed)
+        .map_err(|e| anyhow!("failed to serialize signed legacy transaction: {}", e))?;
+
+    Ok(BASE64_STANDARD.encode(signed_bytes))
+}
+
+pub fn sign_transaction_base64(unsigned_transaction: &str, keypair: &Keypair) -> Result<String> {
+    sign_serialized_transaction_base64(unsigned_transaction, keypair)
+}
 
 // ─── Response types ──────────────────────────────────────────────
 
@@ -203,8 +291,8 @@ fn safe_f64(val: &serde_json::Value) -> f64 {
 /// Get the Jupiter API key from config or fallback.
 fn get_jupiter_api_key(config: &Config) -> String {
     config
-        .api
-        .helius_api_key
+        .jupiter
+        .api_key
         .clone()
         .or_else(|| std::env::var("JUPITER_API_KEY").ok())
         .unwrap_or_else(|| DEFAULT_JUPITER_API_KEY.to_string())
@@ -212,20 +300,25 @@ fn get_jupiter_api_key(config: &Config) -> String {
 
 /// Get referral params from config.
 fn get_referral_params(config: &Config) -> Option<(String, u32)> {
-    // Check config for referral account
-    let referral_account = config.api.agent_meridian_key.clone().unwrap_or_default();
-    let referral_fee_bps = DEFAULT_REFERRAL_FEE_BPS;
+    let account = config
+        .jupiter
+        .referral_account
+        .clone()
+        .or_else(|| std::env::var("JUPITER_REFERRAL_ACCOUNT").ok())
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            if DEFAULT_REFERRAL_ACCOUNT.is_empty() {
+                None
+            } else {
+                Some(DEFAULT_REFERRAL_ACCOUNT.to_string())
+            }
+        })?;
+    let referral_fee_bps = std::env::var("JUPITER_REFERRAL_FEE_BPS")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(config.jupiter.referral_fee_bps);
 
-    // Use the default referral account if configured, otherwise skip
-    let account = if !DEFAULT_REFERRAL_ACCOUNT.is_empty() {
-        DEFAULT_REFERRAL_ACCOUNT.to_string()
-    } else if !referral_account.is_empty() {
-        referral_account
-    } else {
-        return None;
-    };
-
-    if referral_fee_bps < 50 || referral_fee_bps > 255 {
+    if !(50..=255).contains(&referral_fee_bps) {
         return None;
     }
     Some((account, referral_fee_bps))
@@ -367,11 +460,11 @@ pub async fn get_sol_price() -> Result<f64> {
     }
 }
 
-/// Swap tokens via Jupiter Swap V2 API (order → sign → execute).
+/// Swap tokens via Jupiter Swap V2 API (order → Rust sign → execute).
 ///
-/// This function builds the order, but signing requires the wallet private key.
-/// In the Rust version, the caller is responsible for providing a signed
-/// transaction. For now, this returns the order info that needs signing.
+/// In live mode this loads the wallet keypair from `WALLET_PRIVATE_KEY` or
+/// `MERIDIAN_WALLET_PRIVATE_KEY`, signs Jupiter's base64 versioned transaction
+/// locally in Rust, then submits the signed transaction to Jupiter execute.
 pub async fn swap_token(
     mint: &str,
     amount: f64,
@@ -382,7 +475,7 @@ pub async fn swap_token(
     let input_mint = normalize_mint(mint);
     let output_mint = SOL_MINT.to_string();
 
-    if std::env::var("DRY_RUN").ok().as_deref() == Some("true") {
+    if config.dry_run || std::env::var("DRY_RUN").ok().as_deref() == Some("true") {
         return Ok(SwapResult {
             success: false,
             tx: None,
@@ -398,12 +491,7 @@ pub async fn swap_token(
     }
 
     let client = reqwest::Client::new();
-    let jupiter_api_key = config
-        .api
-        .helius_api_key
-        .clone()
-        .or_else(|| std::env::var("JUPITER_API_KEY").ok())
-        .unwrap_or_else(|| DEFAULT_JUPITER_API_KEY.to_string());
+    let jupiter_api_key = get_jupiter_api_key(config);
 
     // Convert amount to smallest unit (9 decimals for SOL)
     let decimals: u32 = 9;
@@ -416,25 +504,20 @@ pub async fn swap_token(
         JUPITER_SWAP_V2_API, input_mint, output_mint, amount_str,
     );
 
-    // Add referral params if configured
-    let referral_params = if referral_bps >= 50 && referral_bps <= 255 {
-        let account = config
-            .api
-            .agent_meridian_key
-            .clone()
-            .unwrap_or_else(|| DEFAULT_REFERRAL_ACCOUNT.to_string());
-        if !account.is_empty() {
-            url = format!(
-                "{}&referralAccount={}&referralFee={}",
-                url, account, referral_bps
-            );
-            Some((account, referral_bps))
+    let referral_params = get_referral_params(config).map(|(account, configured_bps)| {
+        let fee_bps = if (50..=255).contains(&referral_bps) {
+            referral_bps
         } else {
-            None
-        }
-    } else {
-        None
-    };
+            configured_bps
+        };
+        (account, fee_bps)
+    });
+    if let Some((account, fee_bps)) = &referral_params {
+        url = format!(
+            "{}&referralAccount={}&referralFee={}",
+            url, account, fee_bps
+        );
+    }
 
     tracing::info!("swap_token: {} of {} → {}", amount, input_mint, output_mint,);
 
@@ -486,10 +569,7 @@ pub async fn swap_token(
         });
     }
 
-    // NOTE: In a full implementation, we would deserialize the unsigned
-    // transaction, sign it with the wallet keypair, and then execute.
-    // For now, we return the unsigned transaction for the caller to handle.
-    let _unsigned_tx = order
+    let unsigned_tx = order
         .transaction
         .ok_or_else(|| anyhow!("Swap V2 order returned no transaction"))?;
     let request_id = order
@@ -498,25 +578,65 @@ pub async fn swap_token(
 
     tracing::info!("swap_token: order received, request_id={}", request_id);
 
-    // ─── Return order info ───────────────────────────────────────
-    // In production, we'd sign the transaction here and call execute.
-    // For the Rust port, the signing is deferred to the caller or
-    // handled via a keypair loaded at init time.
-    Ok(SwapResult {
-        success: false,
-        tx: None,
-        input_mint: Some(input_mint),
-        output_mint: Some(output_mint),
-        amount_in: Some(amount_str),
-        amount_out: None,
-        referral_account: referral_params.as_ref().map(|(a, _)| a.clone()),
-        referral_fee_bps_requested: referral_params.as_ref().map(|(_, f)| *f),
-        fee_bps_applied: order.fee_bps,
-        error: Some(format!(
-            "Order ready (request_id={}). Transaction signing not yet implemented in Rust.",
-            request_id
-        )),
-    })
+    let keypair = match load_keypair_from_env() {
+        Ok(keypair) => keypair,
+        Err(e) => {
+            return Ok(SwapResult {
+                success: false,
+                tx: None,
+                input_mint: Some(input_mint),
+                output_mint: Some(output_mint),
+                amount_in: Some(amount_str),
+                amount_out: None,
+                referral_account: referral_params.as_ref().map(|(a, _)| a.clone()),
+                referral_fee_bps_requested: referral_params.as_ref().map(|(_, f)| *f),
+                fee_bps_applied: order.fee_bps,
+                error: Some(format!(
+                    "Swap V2 order ready (request_id={}) but wallet keypair is unavailable for Rust signing: {}",
+                    request_id, e
+                )),
+            });
+        }
+    };
+
+    let signed_tx = match sign_transaction_base64(&unsigned_tx, &keypair) {
+        Ok(signed_tx) => signed_tx,
+        Err(e) => {
+            return Ok(SwapResult {
+                success: false,
+                tx: None,
+                input_mint: Some(input_mint),
+                output_mint: Some(output_mint),
+                amount_in: Some(amount_str),
+                amount_out: None,
+                referral_account: referral_params.as_ref().map(|(a, _)| a.clone()),
+                referral_fee_bps_requested: referral_params.as_ref().map(|(_, f)| *f),
+                fee_bps_applied: order.fee_bps,
+                error: Some(format!(
+                    "Swap V2 order ready (request_id={}) but Rust transaction signing failed: {}",
+                    request_id, e
+                )),
+            });
+        }
+    };
+
+    tracing::info!(
+        "swap_token: transaction signed in Rust, executing request_id={}",
+        request_id
+    );
+    let mut result = execute_swap(&signed_tx, &request_id, config).await?;
+    result.input_mint = result.input_mint.or(Some(input_mint));
+    result.output_mint = result.output_mint.or(Some(output_mint));
+    result.amount_in = result.amount_in.or(Some(amount_str));
+    result.referral_account = result
+        .referral_account
+        .or_else(|| referral_params.as_ref().map(|(a, _)| a.clone()));
+    result.referral_fee_bps_requested = result
+        .referral_fee_bps_requested
+        .or_else(|| referral_params.as_ref().map(|(_, f)| *f));
+    result.fee_bps_applied = result.fee_bps_applied.or(order.fee_bps);
+
+    Ok(result)
 }
 
 /// Execute a pre-signed Jupiter swap transaction.
@@ -528,13 +648,23 @@ pub async fn execute_swap(
     request_id: &str,
     config: &Config,
 ) -> Result<SwapResult> {
+    if config.dry_run || std::env::var("DRY_RUN").ok().as_deref() == Some("true") {
+        return Ok(SwapResult {
+            success: false,
+            tx: None,
+            input_mint: None,
+            output_mint: None,
+            amount_in: None,
+            amount_out: None,
+            referral_account: None,
+            referral_fee_bps_requested: None,
+            fee_bps_applied: None,
+            error: Some("DRY RUN — no transaction sent".to_string()),
+        });
+    }
+
     let client = reqwest::Client::new();
-    let jupiter_api_key = config
-        .api
-        .helius_api_key
-        .clone()
-        .or_else(|| std::env::var("JUPITER_API_KEY").ok())
-        .unwrap_or_else(|| DEFAULT_JUPITER_API_KEY.to_string());
+    let jupiter_api_key = get_jupiter_api_key(config);
 
     let body = JupiterExecuteRequest {
         signed_transaction: signed_transaction.to_string(),
@@ -616,6 +746,35 @@ pub async fn execute_swap(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use solana_sdk::signer::Signer;
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn clear(keys: &'static [&'static str]) -> Self {
+            let saved = keys
+                .iter()
+                .map(|key| (*key, std::env::var(key).ok()))
+                .collect::<Vec<_>>();
+            for key in keys {
+                std::env::remove_var(key);
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_normalize_mint_sol() {
@@ -645,5 +804,184 @@ mod tests {
     #[test]
     fn test_normalize_mint_empty() {
         assert_eq!(normalize_mint(""), "");
+    }
+
+    #[test]
+    fn load_keypair_from_base58_secret_preserves_pubkey() {
+        let keypair = solana_sdk::signature::Keypair::new();
+        let encoded = keypair.to_base58_string();
+        let decoded = load_keypair_from_secret(&encoded).expect("base58 keypair should decode");
+
+        assert_eq!(decoded.pubkey(), keypair.pubkey());
+    }
+
+    #[test]
+    fn load_keypair_from_json_array_secret_preserves_pubkey() {
+        let keypair = solana_sdk::signature::Keypair::new();
+        let json =
+            serde_json::to_string(&keypair.to_bytes().to_vec()).expect("serialize keypair bytes");
+        let decoded = load_keypair_from_secret(&json).expect("json array keypair should decode");
+
+        assert_eq!(decoded.pubkey(), keypair.pubkey());
+    }
+
+    #[test]
+    fn load_keypair_from_env_reads_original_js_wallet_private_key() {
+        let keypair = solana_sdk::signature::Keypair::new();
+        let encoded = keypair.to_base58_string();
+        let _guard = EnvGuard::clear(&["WALLET_PRIVATE_KEY", "MERIDIAN_WALLET_PRIVATE_KEY"]);
+        std::env::set_var("WALLET_PRIVATE_KEY", encoded);
+
+        let decoded = load_keypair_from_env().expect("env keypair should decode");
+
+        assert_eq!(decoded.pubkey(), keypair.pubkey());
+    }
+
+    #[test]
+    fn sign_message_uses_loaded_keypair() {
+        let keypair = solana_sdk::signature::Keypair::new();
+        let decoded =
+            load_keypair_from_secret(&keypair.to_base58_string()).expect("decode keypair");
+        let message = b"meridian-rs signing smoke";
+
+        let signature = sign_message(&decoded, message);
+
+        assert!(signature.verify(decoded.pubkey().as_ref(), message));
+    }
+
+    #[test]
+    fn sign_serialized_transaction_base64_signs_legacy_transaction() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use solana_sdk::hash::Hash;
+        use solana_sdk::instruction::{AccountMeta, Instruction};
+        use solana_sdk::message::Message;
+        use solana_sdk::pubkey::Pubkey;
+        use solana_sdk::transaction::Transaction;
+
+        let keypair = solana_sdk::signature::Keypair::new();
+        let program_id = Pubkey::new_unique();
+        let message = Message::new(
+            &[Instruction::new_with_bytes(
+                program_id,
+                &[],
+                vec![AccountMeta::new_readonly(keypair.pubkey(), true)],
+            )],
+            Some(&keypair.pubkey()),
+        );
+        let mut unsigned = Transaction::new_unsigned(message);
+        unsigned.message.recent_blockhash = Hash::new_unique();
+        let encoded_unsigned =
+            STANDARD.encode(bincode::serialize(&unsigned).expect("serialize unsigned tx"));
+
+        let encoded_signed = sign_serialized_transaction_base64(&encoded_unsigned, &keypair)
+            .expect("legacy transaction should sign");
+        let signed: Transaction = bincode::deserialize(
+            &STANDARD
+                .decode(encoded_signed)
+                .expect("decode signed base64"),
+        )
+        .expect("deserialize signed tx");
+        let signed_message = signed.message.serialize();
+
+        assert_eq!(signed.signatures.len(), 1);
+        assert!(signed.signatures[0].verify(keypair.pubkey().as_ref(), &signed_message));
+    }
+
+    #[test]
+    fn sign_transaction_base64_signs_legacy_versioned_transaction() {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        use solana_sdk::instruction::{AccountMeta, Instruction};
+        use solana_sdk::message::{Message, VersionedMessage};
+        use solana_sdk::pubkey::Pubkey;
+        use solana_sdk::transaction::VersionedTransaction;
+
+        let keypair = solana_sdk::signature::Keypair::new();
+        let program_id = Pubkey::new_unique();
+        let message = VersionedMessage::Legacy(Message::new(
+            &[Instruction::new_with_bytes(
+                program_id,
+                &[],
+                vec![AccountMeta::new_readonly(keypair.pubkey(), true)],
+            )],
+            Some(&keypair.pubkey()),
+        ));
+        let unsigned = VersionedTransaction {
+            signatures: vec![
+                Signature::default();
+                message.header().num_required_signatures as usize
+            ],
+            message,
+        };
+        let encoded_unsigned =
+            STANDARD.encode(bincode::serialize(&unsigned).expect("serialize unsigned tx"));
+
+        let encoded_signed = sign_transaction_base64(&encoded_unsigned, &keypair)
+            .expect("versioned transaction should sign");
+        let signed: VersionedTransaction = bincode::deserialize(
+            &STANDARD
+                .decode(encoded_signed)
+                .expect("decode signed base64"),
+        )
+        .expect("deserialize signed tx");
+        let signed_message = signed.message.serialize();
+
+        assert_eq!(signed.signatures.len(), 1);
+        assert!(signed.signatures[0].verify(keypair.pubkey().as_ref(), &signed_message));
+    }
+
+    #[test]
+    fn get_jupiter_api_key_prefers_jupiter_config_over_helius_key() {
+        let config = Config {
+            api: crate::config::types::ApiConfig {
+                helius_api_key: Some("helius-key".to_string()),
+                ..Default::default()
+            },
+            jupiter: crate::config::types::JupiterConfig {
+                api_key: Some("jupiter-key".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert_eq!(get_jupiter_api_key(&config), "jupiter-key");
+    }
+
+    #[test]
+    fn get_referral_params_use_jupiter_config_not_agent_meridian_key() {
+        let config = Config {
+            api: crate::config::types::ApiConfig {
+                agent_meridian_key: Some("agent-public-key".to_string()),
+                ..Default::default()
+            },
+            jupiter: crate::config::types::JupiterConfig {
+                referral_account: Some("jupiter-referral-account".to_string()),
+                referral_fee_bps: 88,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert_eq!(
+            get_referral_params(&config),
+            Some(("jupiter-referral-account".to_string(), 88))
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_swap_respects_config_dry_run() {
+        let config = Config {
+            dry_run: true,
+            ..Default::default()
+        };
+
+        let result = execute_swap("signed-transaction", "request-id", &config)
+            .await
+            .expect("dry run execute swap should not error");
+
+        assert!(!result.success);
+        assert_eq!(
+            result.error.as_deref(),
+            Some("DRY RUN — no transaction sent")
+        );
     }
 }

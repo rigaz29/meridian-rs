@@ -6,18 +6,21 @@ use tokio::signal;
 use tokio::sync::watch;
 
 mod agent;
+mod cli;
 mod config;
 mod cycle;
 mod lessons;
 mod llm;
 mod models;
+mod signal_weights;
 mod state;
+mod strategy_library;
 mod tools;
 mod utils;
 mod web;
 
 use config::llm_config::LlmCredentials;
-use config::load_config;
+use config::{load_config, load_env_files, meridian_data_path};
 use cycle::{run_management_cycle, run_pnl_poll, run_screening_cycle};
 use llm::LlmClient;
 use state::pool_memory::PoolMemoryStore;
@@ -26,6 +29,35 @@ use utils::logger::module::{info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(command) = cli::parse_cli_args(&args)? {
+        match &command {
+            cli::CliCommand::Help => {
+                println!("{}", cli::help_text());
+                return Ok(());
+            }
+            cli::CliCommand::Setup { output_dir, force } => {
+                let output_dir = output_dir.as_deref().unwrap_or(".");
+                let summary = cli::run_setup_command(output_dir, *force)?;
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+                return Ok(());
+            }
+            _ => {}
+        }
+        load_env_files();
+        let config = load_config(None)?;
+        let state_path = std::env::var("MERIDIAN_STATE_PATH").unwrap_or_else(|_| {
+            meridian_data_path("meridian-state.json")
+                .to_string_lossy()
+                .into_owned()
+        });
+        let output = cli::run_cli_command(command, &config, &state_path).await?;
+        println!("{}", output.render()?);
+        return Ok(());
+    }
+
+    load_env_files();
+
     tracing_subscriber::fmt()
         .with_target(false)
         .with_thread_ids(false)
@@ -44,16 +76,21 @@ async fn main() -> Result<()> {
         Some(&config.llm.base_url),
         config.llm.api_key.as_deref(),
     );
-    let llm = LlmClient::new(&creds.api_key, &creds.base_url);
     info(
         "main",
         &format!("LLM client ready -- {}", &config.llm.base_url),
     );
 
-    let state_path =
-        std::env::var("MERIDIAN_STATE_PATH").unwrap_or_else(|_| "meridian-state.json".to_string());
-    let mut positions = PositionState::load(&state_path)?;
-    let pool_memory = PoolMemoryStore::load("pool-memory.json")?;
+    let state_path = std::env::var("MERIDIAN_STATE_PATH").unwrap_or_else(|_| {
+        meridian_data_path("meridian-state.json")
+            .to_string_lossy()
+            .into_owned()
+    });
+    let pool_memory_path = meridian_data_path("pool-memory.json")
+        .to_string_lossy()
+        .into_owned();
+    let positions = PositionState::load(&state_path)?;
+    PoolMemoryStore::load(&pool_memory_path)?;
     info(
         "main",
         &format!(
@@ -63,8 +100,7 @@ async fn main() -> Result<()> {
     );
 
     // Read wallet address from env or config
-    let wallet_address = std::env::var("MERIDIAN_WALLET")
-        .unwrap_or_else(|_| "".to_string());
+    let wallet_address = std::env::var("MERIDIAN_WALLET").unwrap_or_else(|_| "".to_string());
 
     // ── Graceful shutdown channel ──────────────────────────────
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -77,12 +113,26 @@ async fn main() -> Result<()> {
         let _ = shutdown_tx_clone.send(true);
     });
 
+    // ── Web UI (Meridian OS) ───────────────────────────────────
+    let mut shutdown_web = shutdown_rx.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            result = web::start_web_server() => {
+                if let Err(e) = result {
+                    warn("web", &format!("Web UI stopped: {}", e));
+                }
+            }
+            _ = shutdown_web.changed() => {
+                info("web", "Shutdown signal received, stopping Web UI");
+            }
+        }
+    });
+
     info("main", "Starting cycle scheduler...");
 
     // ── PnL Poller (every 30s, lightweight, no LLM) ───────────
-    let pnl_interval = tokio::time::Duration::from_secs(
-        config.schedule.pnl_poll_interval_secs as u64,
-    );
+    let pnl_interval =
+        tokio::time::Duration::from_secs(config.schedule.pnl_poll_interval_secs as u64);
     let config_pnl = config.clone();
     let state_path_pnl = state_path.clone();
     let wallet_pnl = wallet_address.clone();
@@ -125,7 +175,10 @@ async fn main() -> Result<()> {
                         }
                         // Save again after setting instructions
                         if let Err(e) = positions.save(&state_path_pnl) {
-                            warn("pnl_poll", &format!("Failed to save state after instructions: {}", e));
+                            warn(
+                                "pnl_poll",
+                                &format!("Failed to save state after instructions: {}", e),
+                            );
                         }
                     }
                 }
@@ -142,6 +195,7 @@ async fn main() -> Result<()> {
     let config_mgmt = config.clone();
     let llm_mgmt = LlmClient::new(&creds.api_key, &creds.base_url);
     let mgmt_state_path = state_path.clone();
+    let mgmt_pool_memory_path = pool_memory_path.clone();
     let wallet_mgmt = wallet_address.clone();
     let mut shutdown_mgmt = shutdown_rx.clone();
 
@@ -164,7 +218,7 @@ async fn main() -> Result<()> {
                     continue;
                 }
             };
-            let mut pool_memory = match PoolMemoryStore::load("pool-memory.json") {
+            let mut pool_memory = match PoolMemoryStore::load(&mgmt_pool_memory_path) {
                 Ok(pm) => pm,
                 Err(e) => {
                     warn("mgmt", &format!("Failed to load pool memory: {}", e));
@@ -172,9 +226,23 @@ async fn main() -> Result<()> {
                 }
             };
 
-            match run_management_cycle(&config_mgmt, &llm_mgmt, &mut positions, &mut pool_memory, &wallet_mgmt).await {
+            match run_management_cycle(
+                &config_mgmt,
+                &llm_mgmt,
+                &mut positions,
+                &mut pool_memory,
+                &wallet_mgmt,
+            )
+            .await
+            {
                 Ok(result) => {
-                    info("mgmt", &format!("Management cycle complete: {}", &result[..result.len().min(200)]));
+                    info(
+                        "mgmt",
+                        &format!(
+                            "Management cycle complete: {}",
+                            &result[..result.len().min(200)]
+                        ),
+                    );
                     if let Err(e) = positions.save(&mgmt_state_path) {
                         warn("mgmt", &format!("Failed to save state: {}", e));
                     }
@@ -192,6 +260,7 @@ async fn main() -> Result<()> {
     let config_screen = config.clone();
     let llm_screen = LlmClient::new(&creds.api_key, &creds.base_url);
     let screen_state_path = state_path.clone();
+    let screen_pool_memory_path = pool_memory_path.clone();
     let wallet_screen = wallet_address.clone();
     let mut shutdown_screen = shutdown_rx.clone();
 
@@ -214,7 +283,7 @@ async fn main() -> Result<()> {
                     continue;
                 }
             };
-            let mut pool_memory = match PoolMemoryStore::load("pool-memory.json") {
+            let mut pool_memory = match PoolMemoryStore::load(&screen_pool_memory_path) {
                 Ok(pm) => pm,
                 Err(e) => {
                     warn("screen", &format!("Failed to load pool memory: {}", e));
@@ -224,9 +293,15 @@ async fn main() -> Result<()> {
 
             // Fetch real wallet SOL balance
             let wallet_sol = {
-                let rpc = config_screen.api.helius_rpc_url.as_deref().unwrap_or("https://api.mainnet-beta.solana.com");
+                let rpc = config_screen
+                    .api
+                    .helius_rpc_url
+                    .as_deref()
+                    .unwrap_or("https://api.mainnet-beta.solana.com");
                 let helius_key = config_screen.api.helius_api_key.as_deref().unwrap_or("");
-                match crate::tools::wallet::get_wallet_balances(rpc, &wallet_screen, helius_key).await {
+                match crate::tools::wallet::get_wallet_balances(rpc, &wallet_screen, helius_key)
+                    .await
+                {
                     Ok(balances) => balances.sol,
                     Err(e) => {
                         warn("screen", &format!("Failed to fetch wallet balance: {}", e));
@@ -235,9 +310,24 @@ async fn main() -> Result<()> {
                 }
             };
 
-            match run_screening_cycle(&config_screen, &llm_screen, &mut positions, &mut pool_memory, wallet_sol, &wallet_screen).await {
+            match run_screening_cycle(
+                &config_screen,
+                &llm_screen,
+                &mut positions,
+                &mut pool_memory,
+                wallet_sol,
+                &wallet_screen,
+            )
+            .await
+            {
                 Ok(result) => {
-                    info("screen", &format!("Screening cycle complete: {}", &result[..result.len().min(200)]));
+                    info(
+                        "screen",
+                        &format!(
+                            "Screening cycle complete: {}",
+                            &result[..result.len().min(200)]
+                        ),
+                    );
                 }
                 Err(e) => {
                     warn("screen", &format!("Screening cycle error: {}", e));
@@ -251,11 +341,9 @@ async fn main() -> Result<()> {
         }
     });
 
-
     // ── Briefing Cycle (daily at 01:00 UTC) ─────────────────────
     let config_brief = config.clone();
     let state_brief = state_path.clone();
-    let wallet_brief = wallet_address.clone();
     let mut shutdown_brief = shutdown_rx.clone();
 
     tokio::spawn(async move {
@@ -265,7 +353,7 @@ async fn main() -> Result<()> {
         let minute = now.minute();
         let mut ran_today = hour == 1 && minute < 30;
 
-        let mut interval = tokio::time::Duration::from_secs(3600); // check every hour
+        let interval = tokio::time::Duration::from_secs(3600); // check every hour
         let mut tick = tokio::time::interval(interval);
         tick.tick().await;
 
@@ -295,7 +383,7 @@ async fn main() -> Result<()> {
                 let active = positions.get_active();
                 let active_count = active.len();
 
-                let mut briefing = format!(
+                let briefing = format!(
                     "📊 *Meridian Daily Briefing*\n{}\n\n*Open Positions:* {}\n\n{}",
                     now.format("%Y-%m-%d %H:%M UTC"),
                     active_count,
@@ -307,7 +395,10 @@ async fn main() -> Result<()> {
                     config_brief.api.telegram_bot_token.as_deref(),
                     config_brief.api.telegram_chat_id.as_deref(),
                 ) {
-                    if let Err(e) = crate::tools::telegram::send_message_safe(bot_token, chat_id, &briefing).await {
+                    if let Err(e) =
+                        crate::tools::telegram::send_message_safe(bot_token, chat_id, &briefing)
+                            .await
+                    {
                         warn("briefing", &format!("Telegram send failed: {}", e));
                     } else {
                         info("briefing", "Daily briefing sent to Telegram");
@@ -360,7 +451,10 @@ async fn main() -> Result<()> {
     // ── REPL (interactive mode) ────────────────────────────────
     let is_tty = atty::is(atty::Stream::Stdin);
     if is_tty {
-        info("main", "Interactive mode — type 'help' for commands, 'quit' to exit");
+        info(
+            "main",
+            "Interactive mode — type 'help' for commands, 'quit' to exit",
+        );
         let mut shutdown_repl = shutdown_rx.clone();
 
         loop {
@@ -410,7 +504,10 @@ async fn main() -> Result<()> {
         }
     } else {
         // Non-interactive: wait for shutdown signal
-        info("main", "Non-interactive mode, waiting for shutdown signal...");
+        info(
+            "main",
+            "Non-interactive mode, waiting for shutdown signal...",
+        );
         let _ = shutdown_rx.clone().changed().await;
     }
 

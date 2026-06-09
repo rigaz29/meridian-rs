@@ -10,6 +10,10 @@ fn meridian_cli() -> String {
     std::env::var("MERIDIAN_CLI").unwrap_or_else(|_| "/root/meridian/cli.js".to_string())
 }
 
+fn is_dry_run(config: &Config) -> bool {
+    config.dry_run || std::env::var("DRY_RUN").ok().as_deref() == Some("true")
+}
+
 /// Execute a Meridian JS CLI command and parse JSON output.
 async fn cli_exec(args: &[&str]) -> Result<serde_json::Value> {
     let output = tokio::process::Command::new("node")
@@ -23,11 +27,20 @@ async fn cli_exec(args: &[&str]) -> Result<serde_json::Value> {
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
     if !output.status.success() {
-        anyhow::bail!("CLI error (exit {}): {}", output.status.code().unwrap_or(-1), stderr);
+        anyhow::bail!(
+            "CLI error (exit {}): {}",
+            output.status.code().unwrap_or(-1),
+            stderr
+        );
     }
 
-    serde_json::from_str(&stdout)
-        .map_err(|e| anyhow!("Failed to parse CLI JSON output: {} — stdout: {}", e, &stdout[..stdout.len().min(200)]))
+    serde_json::from_str(&stdout).map_err(|e| {
+        anyhow!(
+            "Failed to parse CLI JSON output: {} — stdout: {}",
+            e,
+            &stdout[..stdout.len().min(200)]
+        )
+    })
 }
 
 /// Meteora DLMM program ID.
@@ -503,10 +516,7 @@ pub async fn get_active_bin(pool_address: &str) -> Result<ActiveBinInfo> {
 ///
 /// Calls the Meteora Portfolio API to discover open pools/positions,
 /// then enriches with PnL data from the Meteora PnL API.
-pub async fn get_my_positions(
-    wallet_address: &str,
-    _config: &Config,
-) -> Result<MyPositionsResult> {
+pub async fn get_my_positions(wallet_address: &str, _config: &Config) -> Result<MyPositionsResult> {
     let client = make_client();
 
     // ─── Fetch portfolio from Meteora ────────────────────────────
@@ -538,7 +548,10 @@ pub async fn get_my_positions(
         .map_err(|e| anyhow!("Failed to parse portfolio response: {}", e))?;
 
     let pools = portfolio.pools.unwrap_or_default();
-    tracing::info!("get_my_positions: found {} pool(s) with open positions", pools.len());
+    tracing::info!(
+        "get_my_positions: found {} pool(s) with open positions",
+        pools.len()
+    );
 
     // ─── Fetch PnL data for all pools in parallel ────────────────
     let mut all_positions = Vec::new();
@@ -549,9 +562,7 @@ pub async fn get_my_positions(
             continue;
         }
 
-        let position_addresses = pool.list_positions.as_ref()
-            .map(|v| v.clone())
-            .unwrap_or_default();
+        let position_addresses = pool.list_positions.clone().unwrap_or_default();
 
         if position_addresses.is_empty() {
             continue;
@@ -563,32 +574,28 @@ pub async fn get_my_positions(
             METEORA_DLMM_API, pool_addr, wallet_address,
         );
 
-        let pnl_map: HashMap<String, PositionPnlData> = match client
-            .get(&pnl_url)
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                resp.json::<PnlPoolResponse>()
-                    .await
-                    .map(|data| {
-                        let positions = data.positions.unwrap_or_default();
-                        let mut map = HashMap::new();
-                        for p in positions {
-                            let addr = p.position_address
-                                .as_deref()
-                                .or(p.address.as_deref())
-                                .or(p.position.as_deref())
-                                .unwrap_or("")
-                                .to_string();
-                            if !addr.is_empty() {
-                                map.insert(addr, p);
-                            }
+        let pnl_map: HashMap<String, PositionPnlData> = match client.get(&pnl_url).send().await {
+            Ok(resp) if resp.status().is_success() => resp
+                .json::<PnlPoolResponse>()
+                .await
+                .map(|data| {
+                    let positions = data.positions.unwrap_or_default();
+                    let mut map = HashMap::new();
+                    for p in positions {
+                        let addr = p
+                            .position_address
+                            .as_deref()
+                            .or(p.address.as_deref())
+                            .or(p.position.as_deref())
+                            .unwrap_or("")
+                            .to_string();
+                        if !addr.is_empty() {
+                            map.insert(addr, p);
                         }
-                        map
-                    })
-                    .unwrap_or_default()
-            }
+                    }
+                    map
+                })
+                .unwrap_or_default(),
             _ => HashMap::new(),
         };
 
@@ -600,12 +607,14 @@ pub async fn get_my_positions(
             let in_range = pnl.map(|p| !p.is_out_of_range.unwrap_or(false));
 
             let unclaimed_fees = pnl.map(|p| {
-                let x_fee = p.unrealized_pnl
+                let x_fee = p
+                    .unrealized_pnl
                     .as_ref()
                     .and_then(|u| u.unclaimed_fee_token_x.as_ref())
                     .and_then(|t| t.usd)
                     .unwrap_or(0.0);
-                let y_fee = p.unrealized_pnl
+                let y_fee = p
+                    .unrealized_pnl
                     .as_ref()
                     .and_then(|u| u.unclaimed_fee_token_y.as_ref())
                     .and_then(|t| t.usd)
@@ -718,8 +727,16 @@ pub async fn get_position_pnl(
         .unrealized_pnl
         .as_ref()
         .map(|u| {
-            let x_usd = u.unclaimed_fee_token_x.as_ref().and_then(|t| t.usd).unwrap_or(0.0);
-            let y_usd = u.unclaimed_fee_token_y.as_ref().and_then(|t| t.usd).unwrap_or(0.0);
+            let x_usd = u
+                .unclaimed_fee_token_x
+                .as_ref()
+                .and_then(|t| t.usd)
+                .unwrap_or(0.0);
+            let y_usd = u
+                .unclaimed_fee_token_y
+                .as_ref()
+                .and_then(|t| t.usd)
+                .unwrap_or(0.0);
             round(x_usd + y_usd, 4)
         })
         .unwrap_or(0.0);
@@ -774,10 +791,9 @@ pub async fn deploy_position(
     strategy: Option<&str>,
     config: &Config,
 ) -> Result<DeployResult> {
-    let _ = config;
     let pool_address = crate::tools::wallet::normalize_mint(pool_address);
 
-    if std::env::var("DRY_RUN").ok().as_deref() == Some("true") {
+    if is_dry_run(config) {
         let bins_below_val = bins_below.unwrap_or(DEFAULT_BINS_BELOW);
         let bins_above_val = bins_above.unwrap_or(0);
         return Ok(DeployResult {
@@ -823,11 +839,13 @@ pub async fn deploy_position(
     );
 
     // ─── Fetch active bin and pool info ──────────────────────────
-    let active_bin = get_active_bin(&pool_address).await.unwrap_or(ActiveBinInfo {
-        bin_id: 0,
-        price: 0.0,
-        price_per_lamport: None,
-    });
+    let active_bin = get_active_bin(&pool_address)
+        .await
+        .unwrap_or(ActiveBinInfo {
+            bin_id: 0,
+            price: 0.0,
+            price_per_lamport: None,
+        });
 
     let min_bin_id = active_bin.bin_id - bins_below_val as i32;
     let max_bin_id = if bins_above_val > 0 {
@@ -849,41 +867,28 @@ pub async fn deploy_position(
         .and_then(|m| m.extra.get("base_fee_percentage"))
         .and_then(|v| v.as_f64());
 
-    // Execute deploy via Meridian JS CLI (uses @meteora-ag/dlmm SDK)
-    let amount_str = format!("{:.4}", amount_sol);
-    let bins_below_str = bins_below_val.to_string();
-    let bins_above_str = bins_above_val.to_string();
-    let mut cli_args: Vec<&str> = vec![
-        "deploy",
-        "--pool", &pool_address,
-        "--amount", &amount_str,
-        "--bins-below", &bins_below_str,
-        "--bins-above", &bins_above_str,
-        "--strategy", strategy_str,
-    ];
-
-    if std::env::var("DRY_RUN").ok().as_deref() == Some("true") {
-        cli_args.push("--dry-run");
-    }
-
-    match cli_exec(&cli_args).await {
+    match crate::tools::meteora_native::deploy_position(
+        &pool_address,
+        amount_sol,
+        active_bin.bin_id,
+        bins_below_val,
+        bins_above_val,
+        strategy_str,
+        config,
+    )
+    .await
+    {
         Ok(result) => {
-            let position_addr = result.get("position").and_then(|v| v.as_str()).map(String::from);
-            let txs = result.get("txs").and_then(|v| v.as_str()).map(String::from);
-            let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
-            let error = if !success {
-                result.get("error").and_then(|v| v.as_str()).map(String::from)
-            } else {
-                None
-            };
-
+            tracing::info!(
+                "native deploy_position result: position={} signature={}",
+                result.position_address,
+                result.signature,
+            );
             Ok(DeployResult {
-                success,
-                position: position_addr.clone(),
+                success: true,
+                position: Some(result.position_address),
                 pool: Some(pool_address),
-                pool_name: pool_meta
-                    .as_ref()
-                    .and_then(|m| m.name.clone()),
+                pool_name: pool_meta.as_ref().and_then(|m| m.name.clone()),
                 bin_range: Some(BinRange {
                     min: min_bin_id,
                     max: max_bin_id,
@@ -896,20 +901,18 @@ pub async fn deploy_position(
                 wide_range: Some(is_wide_range),
                 amount_x: Some(0.0),
                 amount_y: Some(amount_sol),
-                txs: txs.map(|t| vec![t]),
-                error,
-                note: result.get("note").and_then(|v| v.as_str()).map(String::from),
+                txs: Some(vec![result.signature]),
+                error: None,
+                note: None,
             })
         }
         Err(e) => {
-            tracing::error!("deploy_position CLI failed: {}", e);
+            tracing::error!("native deploy_position failed: {}", e);
             Ok(DeployResult {
                 success: false,
                 position: None,
                 pool: Some(pool_address),
-                pool_name: pool_meta
-                    .as_ref()
-                    .and_then(|m| m.name.clone()),
+                pool_name: pool_meta.as_ref().and_then(|m| m.name.clone()),
                 bin_range: Some(BinRange {
                     min: min_bin_id,
                     max: max_bin_id,
@@ -923,7 +926,7 @@ pub async fn deploy_position(
                 amount_x: Some(0.0),
                 amount_y: Some(amount_sol),
                 txs: None,
-                error: Some(format!("CLI execution failed: {}", e)),
+                error: Some(format!("Native Meteora deploy failed: {}", e)),
                 note: None,
             })
         }
@@ -938,11 +941,11 @@ pub async fn deploy_position(
 pub async fn close_position(
     position_address: &str,
     reason: Option<&str>,
-    _config: &Config,
+    config: &Config,
 ) -> Result<CloseResult> {
     let position_address = crate::tools::wallet::normalize_mint(position_address);
 
-    if std::env::var("DRY_RUN").ok().as_deref() == Some("true") {
+    if is_dry_run(config) {
         return Ok(CloseResult {
             success: false,
             position: Some(position_address),
@@ -964,54 +967,33 @@ pub async fn close_position(
         reason.unwrap_or("agent decision"),
     );
 
-    // Execute close via Meridian JS CLI
-    let mut cli_args = vec![
-        "close",
-        "--position", &position_address,
-    ];
-
-    if std::env::var("DRY_RUN").ok().as_deref() == Some("true") {
-        cli_args.push("--dry-run");
-    }
-
-    match cli_exec(&cli_args).await {
+    match crate::tools::meteora_native::close_position(&position_address, config, None).await {
         Ok(result) => {
-            let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
-            let pool = result.get("pool").and_then(|v| v.as_str()).map(String::from);
-            let pool_name = result.get("pool_name").and_then(|v| v.as_str()).map(String::from);
-            let pnl_usd = result.get("pnl_usd").and_then(|v| v.as_f64());
-            let pnl_pct = result.get("pnl_pct").and_then(|v| v.as_f64());
-            let base_mint = result.get("base_mint").and_then(|v| v.as_str()).map(String::from);
-            let claim_txs = result.get("claim_txs").and_then(|v| v.as_str()).map(String::from);
-            let close_txs = result.get("close_txs").and_then(|v| v.as_str()).map(String::from);
-            let txs = result.get("txs").and_then(|v| v.as_str()).map(String::from);
-            let error = if !success {
-                result.get("error").and_then(|v| v.as_str()).map(String::from)
-            } else {
-                None
-            };
-
             tracing::info!(
-                "close_position result: success={} pnl_usd={:?} pnl_pct={:?}",
-                success, pnl_usd, pnl_pct,
+                "native close_position result: signature={} remove_x={} remove_y={} fee_x={} fee_y={} rewards={:?}",
+                result.signature,
+                result.remove_liquidity_amount_x,
+                result.remove_liquidity_amount_y,
+                result.claimable_fee_x,
+                result.claimable_fee_y,
+                result.claimable_rewards,
             );
-
             Ok(CloseResult {
-                success,
+                success: true,
                 position: Some(position_address),
-                pool,
-                pool_name,
-                claim_txs: claim_txs.map(|t| vec![t]),
-                close_txs: close_txs.map(|t| vec![t]),
-                txs: txs.map(|t| vec![t]),
-                pnl_usd,
-                pnl_pct,
-                base_mint,
-                error,
+                pool: None,
+                pool_name: None,
+                claim_txs: None,
+                close_txs: Some(vec![result.signature.clone()]),
+                txs: Some(vec![result.signature]),
+                pnl_usd: None,
+                pnl_pct: None,
+                base_mint: None,
+                error: None,
             })
         }
         Err(e) => {
-            tracing::error!("close_position CLI failed: {}", e);
+            tracing::error!("native close_position failed: {}", e);
             Ok(CloseResult {
                 success: false,
                 position: Some(position_address),
@@ -1023,7 +1005,7 @@ pub async fn close_position(
                 pnl_usd: None,
                 pnl_pct: None,
                 base_mint: None,
-                error: Some(format!("CLI execution failed: {}", e)),
+                error: Some(format!("Native Meteora close failed: {}", e)),
             })
         }
     }
@@ -1034,13 +1016,10 @@ pub async fn close_position(
 /// Since the Meteora DLMM SDK crate is not available in Rust, this function
 /// builds the claim transaction data. In the current implementation, it
 /// returns a placeholder indicating what would be claimed.
-pub async fn claim_fees(
-    position_address: &str,
-    _config: &Config,
-) -> Result<ClaimResult> {
+pub async fn claim_fees(position_address: &str, config: &Config) -> Result<ClaimResult> {
     let position_address = crate::tools::wallet::normalize_mint(position_address);
 
-    if std::env::var("DRY_RUN").ok().as_deref() == Some("true") {
+    if is_dry_run(config) {
         return Ok(ClaimResult {
             success: false,
             position: Some(position_address),
@@ -1055,44 +1034,30 @@ pub async fn claim_fees(
         &position_address[..8.min(position_address.len())],
     );
 
-    // Execute claim via Meridian JS CLI
-    let cli_args = vec![
-        "claim",
-        "--position", &position_address,
-    ];
-
-    match cli_exec(&cli_args).await {
+    match crate::tools::meteora_native::claim_fees(&position_address, config).await {
         Ok(result) => {
-            let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
-            let txs = result.get("txs").and_then(|v| v.as_str()).map(String::from);
-            let base_mint = result.get("base_mint").and_then(|v| v.as_str()).map(String::from);
-            let error = if !success {
-                result.get("error").and_then(|v| v.as_str()).map(String::from)
-            } else {
-                None
-            };
-
             tracing::info!(
-                "claim_fees result: success={} base_mint={:?}",
-                success, base_mint,
+                "native claim_fees result: signature={} claimable_fee_x={} claimable_fee_y={}",
+                result.signature,
+                result.claimable_fee_x,
+                result.claimable_fee_y,
             );
-
             Ok(ClaimResult {
-                success,
+                success: true,
                 position: Some(position_address),
-                txs: txs.map(|t| vec![t]),
-                base_mint,
-                error,
+                txs: Some(vec![result.signature]),
+                base_mint: None,
+                error: None,
             })
         }
         Err(e) => {
-            tracing::error!("claim_fees CLI failed: {}", e);
+            tracing::error!("native claim_fees failed: {}", e);
             Ok(ClaimResult {
                 success: false,
                 position: Some(position_address),
                 txs: None,
                 base_mint: None,
-                error: Some(format!("CLI execution failed: {}", e)),
+                error: Some(format!("Native Meteora claim failed: {}", e)),
             })
         }
     }
@@ -1101,10 +1066,7 @@ pub async fn claim_fees(
 /// Search for DLMM pools by token symbol or address.
 ///
 /// Calls the Meteora DLMM Data API pool search endpoint.
-pub async fn search_pools(
-    query: &str,
-    limit: Option<usize>,
-) -> Result<SearchPoolsResult> {
+pub async fn search_pools(query: &str, limit: Option<usize>) -> Result<SearchPoolsResult> {
     let client = make_client();
     let limit = limit.unwrap_or(10);
     let url = format!(
@@ -1142,65 +1104,48 @@ pub async fn search_pools(
     let pools: Vec<SearchPoolEntry> = pools_raw
         .into_iter()
         .take(limit)
-        .map(|p| {
-            SearchPoolEntry {
-                pool: p
-                    .get("address")
-                    .or_else(|| p.get("pool_address"))
+        .map(|p| SearchPoolEntry {
+            pool: p
+                .get("address")
+                .or_else(|| p.get("pool_address"))
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            name: p.get("name").and_then(|v| v.as_str()).map(String::from),
+            bin_step: p
+                .get("bin_step")
+                .or_else(|| p.get("dlmm_params").and_then(|dp| dp.get("bin_step")))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u16),
+            fee_pct: p
+                .get("base_fee_percentage")
+                .or_else(|| p.get("fee_pct"))
+                .and_then(|v| v.as_f64()),
+            tvl: p.get("liquidity").and_then(|v| v.as_f64()),
+            volume_24h: p.get("trade_volume_24h").and_then(|v| v.as_f64()),
+            token_x: Some(SearchToken {
+                symbol: p
+                    .get("mint_x_symbol")
+                    .or_else(|| p.get("token_x").and_then(|tx| tx.get("symbol")))
                     .and_then(|v| v.as_str())
                     .map(String::from),
-                name: p.get("name").and_then(|v| v.as_str()).map(String::from),
-                bin_step: p
-                    .get("bin_step")
-                    .or_else(|| {
-                        p.get("dlmm_params")
-                            .and_then(|dp| dp.get("bin_step"))
-                    })
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as u16),
-                fee_pct: p
-                    .get("base_fee_percentage")
-                    .or_else(|| p.get("fee_pct"))
-                    .and_then(|v| v.as_f64()),
-                tvl: p.get("liquidity").and_then(|v| v.as_f64()),
-                volume_24h: p.get("trade_volume_24h").and_then(|v| v.as_f64()),
-                token_x: Some(SearchToken {
-                    symbol: p
-                        .get("mint_x_symbol")
-                        .or_else(|| {
-                            p.get("token_x")
-                                .and_then(|tx| tx.get("symbol"))
-                        })
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    mint: p
-                        .get("mint_x")
-                        .or_else(|| {
-                            p.get("token_x")
-                                .and_then(|tx| tx.get("address"))
-                        })
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                }),
-                token_y: Some(SearchToken {
-                    symbol: p
-                        .get("mint_y_symbol")
-                        .or_else(|| {
-                            p.get("token_y")
-                                .and_then(|ty| ty.get("symbol"))
-                        })
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                    mint: p
-                        .get("mint_y")
-                        .or_else(|| {
-                            p.get("token_y")
-                                .and_then(|ty| ty.get("address"))
-                        })
-                        .and_then(|v| v.as_str())
-                        .map(String::from),
-                }),
-            }
+                mint: p
+                    .get("mint_x")
+                    .or_else(|| p.get("token_x").and_then(|tx| tx.get("address")))
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+            }),
+            token_y: Some(SearchToken {
+                symbol: p
+                    .get("mint_y_symbol")
+                    .or_else(|| p.get("token_y").and_then(|ty| ty.get("symbol")))
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                mint: p
+                    .get("mint_y")
+                    .or_else(|| p.get("token_y").and_then(|ty| ty.get("address")))
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+            }),
         })
         .collect();
 
@@ -1217,9 +1162,7 @@ pub async fn search_pools(
 /// Uses the DLMM program accounts with memcmp filter to discover positions.
 /// Since Solana RPC calls are complex in Rust without a full SDK, this
 /// uses the Meteora PnL API as an alternative.
-pub async fn get_wallet_positions(
-    wallet_address: &str,
-) -> Result<WalletPositionsResult> {
+pub async fn get_wallet_positions(wallet_address: &str) -> Result<WalletPositionsResult> {
     let client = make_client();
 
     // Use portfolio API to discover positions
@@ -1255,9 +1198,7 @@ pub async fn get_wallet_positions(
 
     for pool in &pools {
         let pool_addr = pool.pool_address.as_deref().unwrap_or("");
-        let position_addresses = pool.list_positions.as_ref()
-            .map(|v| v.clone())
-            .unwrap_or_default();
+        let position_addresses = pool.list_positions.clone().unwrap_or_default();
 
         // Fetch PnL for this pool
         let pnl_url = format!(
@@ -1265,32 +1206,28 @@ pub async fn get_wallet_positions(
             METEORA_DLMM_API, pool_addr, wallet_address,
         );
 
-        let pnl_map: HashMap<String, PositionPnlData> = match client
-            .get(&pnl_url)
-            .send()
-            .await
-        {
-            Ok(resp) if resp.status().is_success() => {
-                resp.json::<PnlPoolResponse>()
-                    .await
-                    .map(|data| {
-                        let positions = data.positions.unwrap_or_default();
-                        let mut map = HashMap::new();
-                        for p in positions {
-                            let addr = p.position_address
-                                .as_deref()
-                                .or(p.address.as_deref())
-                                .or(p.position.as_deref())
-                                .unwrap_or("")
-                                .to_string();
-                            if !addr.is_empty() {
-                                map.insert(addr, p);
-                            }
+        let pnl_map: HashMap<String, PositionPnlData> = match client.get(&pnl_url).send().await {
+            Ok(resp) if resp.status().is_success() => resp
+                .json::<PnlPoolResponse>()
+                .await
+                .map(|data| {
+                    let positions = data.positions.unwrap_or_default();
+                    let mut map = HashMap::new();
+                    for p in positions {
+                        let addr = p
+                            .position_address
+                            .as_deref()
+                            .or(p.address.as_deref())
+                            .or(p.position.as_deref())
+                            .unwrap_or("")
+                            .to_string();
+                        if !addr.is_empty() {
+                            map.insert(addr, p);
                         }
-                        map
-                    })
-                    .unwrap_or_default()
-            }
+                    }
+                    map
+                })
+                .unwrap_or_default(),
             _ => HashMap::new(),
         };
 
@@ -1307,18 +1244,28 @@ pub async fn get_wallet_positions(
                 active_bin: pnl.and_then(|p| p.pool_active_bin_id),
                 in_range: pnl.map(|p| !p.is_out_of_range.unwrap_or(false)),
                 unclaimed_fees_usd: pnl.map(|p| {
-                    let x = p.unrealized_pnl.as_ref()
+                    let x = p
+                        .unrealized_pnl
+                        .as_ref()
                         .and_then(|u| u.unclaimed_fee_token_x.as_ref())
                         .and_then(|t| t.usd)
                         .unwrap_or(0.0);
-                    let y = p.unrealized_pnl.as_ref()
+                    let y = p
+                        .unrealized_pnl
+                        .as_ref()
                         .and_then(|u| u.unclaimed_fee_token_y.as_ref())
                         .and_then(|t| t.usd)
                         .unwrap_or(0.0);
                     round(x + y, 4)
                 }),
                 total_value_usd: pnl.map(|p| {
-                    round(p.unrealized_pnl.as_ref().and_then(|u| u.balances).unwrap_or(0.0), 4)
+                    round(
+                        p.unrealized_pnl
+                            .as_ref()
+                            .and_then(|u| u.balances)
+                            .unwrap_or(0.0),
+                        4,
+                    )
                 }),
                 pnl_usd: pnl.map(|p| round(p.pnl_usd.unwrap_or(0.0), 4)),
                 pnl_pct: pnl.and_then(|p| p.pnl_pct_change).map(|v| round(v, 2)),
@@ -1358,4 +1305,156 @@ async fn get_pool_metadata(pool_address: &str) -> Option<PoolMetadata> {
     }
 
     resp.json::<PoolMetadata>().await.ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct EnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn clear(keys: &'static [&'static str]) -> Self {
+            let saved = keys
+                .iter()
+                .map(|key| (*key, std::env::var(key).ok()))
+                .collect();
+            for key in keys {
+                std::env::remove_var(key);
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn deploy_close_and_claim_respect_config_dry_run() {
+        let config = Config {
+            dry_run: true,
+            ..Default::default()
+        };
+        let pool = "11111111111111111111111111111111";
+        let position = "22222222222222222222222222222222";
+
+        let deploy = deploy_position(pool, 0.5, Some(35), Some(0), Some("bid_ask"), &config)
+            .await
+            .expect("dry-run deploy should not error");
+        assert!(!deploy.success);
+        assert_eq!(deploy.pool.as_deref(), Some(pool));
+        assert!(deploy
+            .note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("DRY RUN"));
+
+        let close = close_position(position, Some("test dry-run"), &config)
+            .await
+            .expect("dry-run close should not error");
+        assert!(!close.success);
+        assert_eq!(close.position.as_deref(), Some(position));
+        assert_eq!(
+            close.error.as_deref(),
+            Some("DRY RUN — no transaction sent")
+        );
+
+        let claim = claim_fees(position, &config)
+            .await
+            .expect("dry-run claim should not error");
+        assert!(!claim.success);
+        assert_eq!(claim.position.as_deref(), Some(position));
+        assert_eq!(
+            claim.error.as_deref(),
+            Some("DRY RUN — no transaction sent")
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_live_path_uses_native_meteora_before_js_cli() {
+        let _guard = EnvGuard::clear(&["WALLET_PRIVATE_KEY", "MERIDIAN_WALLET_PRIVATE_KEY"]);
+        let position = "22222222222222222222222222222222";
+        let config = Config {
+            dry_run: false,
+            ..Default::default()
+        };
+
+        let claim = claim_fees(position, &config)
+            .await
+            .expect("native claim errors should be returned as ClaimResult");
+
+        assert!(!claim.success);
+        assert_eq!(claim.position.as_deref(), Some(position));
+        assert!(
+            claim
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("WALLET_PRIVATE_KEY"),
+            "expected missing wallet error, got {:?}",
+            claim.error
+        );
+    }
+
+    #[tokio::test]
+    async fn close_live_path_uses_native_meteora_before_js_cli() {
+        let _guard = EnvGuard::clear(&["WALLET_PRIVATE_KEY", "MERIDIAN_WALLET_PRIVATE_KEY"]);
+        let position = "22222222222222222222222222222222";
+        let config = Config {
+            dry_run: false,
+            ..Default::default()
+        };
+
+        let close = close_position(position, Some("test native close"), &config)
+            .await
+            .expect("native close errors should be returned as CloseResult");
+
+        assert!(!close.success);
+        assert_eq!(close.position.as_deref(), Some(position));
+        assert!(
+            close
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("WALLET_PRIVATE_KEY"),
+            "expected missing wallet error, got {:?}",
+            close.error
+        );
+    }
+
+    #[tokio::test]
+    async fn deploy_live_path_uses_native_meteora_before_js_cli() {
+        let _guard = EnvGuard::clear(&["WALLET_PRIVATE_KEY", "MERIDIAN_WALLET_PRIVATE_KEY"]);
+        let pool = "22222222222222222222222222222222";
+        let config = Config {
+            dry_run: false,
+            ..Default::default()
+        };
+
+        let deploy = deploy_position(pool, 0.25, Some(35), Some(0), Some("spot"), &config)
+            .await
+            .expect("native deploy errors should be returned as DeployResult");
+
+        assert!(!deploy.success);
+        assert_eq!(deploy.pool.as_deref(), Some(pool));
+        assert!(
+            deploy
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("WALLET_PRIVATE_KEY"),
+            "expected missing wallet error, got {:?}",
+            deploy.error
+        );
+    }
 }

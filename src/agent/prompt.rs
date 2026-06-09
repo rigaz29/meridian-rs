@@ -25,16 +25,19 @@ pub fn build_system_prompt(
     positions_json: &str,
     state_summary: &str,
     lessons: &str,
-    _perf_summary: &str,
+    recent_decisions: &str,
 ) -> String {
     match role {
-        AgentRole::Manager => build_manager_prompt(config, portfolio_json, lessons),
+        AgentRole::Manager => {
+            build_manager_prompt(config, portfolio_json, lessons, recent_decisions)
+        }
         AgentRole::Screener => build_screener_prompt(
             config,
             portfolio_json,
             positions_json,
             state_summary,
             lessons,
+            recent_decisions,
         ),
         AgentRole::General => build_general_prompt(
             config,
@@ -42,11 +45,25 @@ pub fn build_system_prompt(
             positions_json,
             state_summary,
             lessons,
+            recent_decisions,
         ),
     }
 }
 
-fn build_manager_prompt(config: &Config, portfolio: &str, lessons: &str) -> String {
+fn recent_decisions_section(recent_decisions: &str) -> String {
+    if recent_decisions.trim().is_empty() {
+        String::new()
+    } else {
+        format!("RECENT DECISIONS:\n{}\n", recent_decisions)
+    }
+}
+
+fn build_manager_prompt(
+    config: &Config,
+    portfolio: &str,
+    lessons: &str,
+    recent_decisions: &str,
+) -> String {
     let mgmt_json = serde_json::to_string(&config.management).unwrap_or_default();
     let lessons_section = if lessons.is_empty() {
         String::new()
@@ -58,6 +75,7 @@ fn build_manager_prompt(config: &Config, portfolio: &str, lessons: &str) -> Stri
             lessons
         )
     };
+    let recent_decisions_section = recent_decisions_section(recent_decisions);
     let ts = now_iso();
 
     format!(
@@ -73,8 +91,8 @@ Management Config: {}
          2. GAS EFFICIENCY: Only close for clear reasons. After close, swap_token MANDATORY for tokens >= $0.10.
          3. DATA-DRIVEN AUTONOMY: Full autonomy.
 
-         {}Timestamp: {}",
-        portfolio, mgmt_json, lessons_section, ts,
+         {}{}Timestamp: {}",
+        portfolio, mgmt_json, lessons_section, recent_decisions_section, ts,
     )
 }
 
@@ -84,6 +102,7 @@ fn build_screener_prompt(
     positions: &str,
     state: &str,
     lessons: &str,
+    recent_decisions: &str,
 ) -> String {
     let min_fees = config.screening.min_token_fees_sol;
     let max_bot = config.screening.max_bot_holders_pct;
@@ -100,6 +119,7 @@ fn build_screener_prompt(
             lessons
         )
     };
+    let recent_decisions_section = recent_decisions_section(recent_decisions);
     let ts = now_iso();
 
     format!(
@@ -129,7 +149,7 @@ fee_active_tvl_ratio is already in %. 0.29 = 0.29%. Do NOT multiply.
 Positions: {positions}
 State: {state}
 
-         {lessons}Timestamp: {ts}",
+         {lessons}{recent_decisions_section}Timestamp: {ts}",
     )
 }
 
@@ -139,6 +159,7 @@ fn build_general_prompt(
     positions: &str,
     state: &str,
     lessons: &str,
+    recent_decisions: &str,
 ) -> String {
     let config_json = serde_json::to_string(&serde_json::json!({
         "screening": config.screening,
@@ -155,6 +176,7 @@ fn build_general_prompt(
             lessons
         )
     };
+    let recent_decisions_section = recent_decisions_section(recent_decisions);
     let ts = now_iso();
 
     format!(
@@ -166,7 +188,7 @@ Memory: {state}
 
          Config: {config_json}
 
-         {lessons}         BEHAVIORAL CORE:
+         {lessons}{recent_decisions_section}         BEHAVIORAL CORE:
          1. PATIENCE IS PROFIT
          2. GAS EFFICIENCY
          3. DATA-DRIVEN AUTONOMY
@@ -177,4 +199,26 @@ Memory: {state}
 
          Timestamp: {ts}",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_prompt_injects_recent_decisions_context() {
+        let prompt = build_system_prompt(
+            &AgentRole::General,
+            &Config::default(),
+            r#"{"sol":1.0}"#,
+            "[]",
+            "pool memory empty",
+            "lesson text",
+            "- deploy_position success=true pool=Pool111 result=DRY RUN",
+        );
+
+        assert!(prompt.contains("RECENT DECISIONS:"));
+        assert!(prompt.contains("deploy_position"));
+        assert!(prompt.contains("Pool111"));
+    }
 }

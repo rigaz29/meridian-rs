@@ -155,7 +155,7 @@ impl PoolMemoryStore {
             return "No pool history".to_string();
         }
         let mut lines = Vec::new();
-        for (_, entry) in &self.pools {
+        for entry in self.pools.values() {
             if entry.total_positions > 0 || !entry.notes.is_empty() {
                 let mut line = format!(
                     "{}: {} positions, {:.4} SOL fees",

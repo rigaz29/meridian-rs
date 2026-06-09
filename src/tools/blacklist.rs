@@ -113,7 +113,7 @@ impl BlacklistStore {
             .with_context(|| format!("Failed to read {}", path.display()))?;
 
         let entries: HashMap<String, BlockedDevEntry> = serde_json::from_str(&content)
-            .with_context(|| format!("Invalid dev blocklist: JSON parse error"))?;
+            .with_context(|| "Invalid dev blocklist: JSON parse error".to_string())?;
 
         Ok(entries)
     }
@@ -121,10 +121,9 @@ impl BlacklistStore {
     /// Save the combined blacklist store to disk.
     pub fn save(&self) -> Result<()> {
         let path = Self::data_dir().join(BLACKLIST_FILE);
-        let json = serde_json::to_string_pretty(self)
-            .context("Failed to serialize blacklist store")?;
-        fs::write(&path, &json)
-            .with_context(|| format!("Failed to write {}", path.display()))?;
+        let json =
+            serde_json::to_string_pretty(self).context("Failed to serialize blacklist store")?;
+        fs::write(&path, &json).with_context(|| format!("Failed to write {}", path.display()))?;
         Ok(())
     }
 
@@ -133,8 +132,7 @@ impl BlacklistStore {
         let path = Self::data_dir().join(DEV_BLOCKLIST_FILE);
         let json = serde_json::to_string_pretty(&self.blocked_devs)
             .context("Failed to serialize dev blocklist")?;
-        fs::write(&path, &json)
-            .with_context(|| format!("Failed to write {}", path.display()))?;
+        fs::write(&path, &json).with_context(|| format!("Failed to write {}", path.display()))?;
         Ok(())
     }
 
@@ -311,10 +309,7 @@ impl BlacklistStore {
                     was_reason: entry.reason,
                 })
             }
-            None => Err(anyhow::anyhow!(
-                "Wallet {} not on dev blocklist",
-                wallet
-            )),
+            None => Err(anyhow::anyhow!("Wallet {} not on dev blocklist", wallet)),
         }
     }
 
@@ -410,7 +405,11 @@ pub fn is_blacklisted(mint: &str) -> bool {
 }
 
 /// Add a token to the blacklist.
-pub fn add_to_blacklist(mint: &str, symbol: Option<&str>, reason: Option<&str>) -> Result<BlacklistAddResult> {
+pub fn add_to_blacklist(
+    mint: &str,
+    symbol: Option<&str>,
+    reason: Option<&str>,
+) -> Result<BlacklistAddResult> {
     let mut store = BlacklistStore::load()?;
     store.add_to_blacklist(mint, symbol, reason)
 }
@@ -440,14 +439,21 @@ pub fn is_dev_blocked(dev_wallet: &str) -> bool {
     match BlacklistStore::load() {
         Ok(store) => store.is_dev_blocked(dev_wallet),
         Err(e) => {
-            module::error("dev_blocklist", &format!("Failed to load dev blocklist: {}", e));
+            module::error(
+                "dev_blocklist",
+                &format!("Failed to load dev blocklist: {}", e),
+            );
             false
         }
     }
 }
 
 /// Block a developer wallet.
-pub fn block_dev(wallet: &str, reason: Option<&str>, label: Option<&str>) -> Result<DevBlockResult> {
+pub fn block_dev(
+    wallet: &str,
+    reason: Option<&str>,
+    label: Option<&str>,
+) -> Result<DevBlockResult> {
     let mut store = BlacklistStore::load()?;
     store.block_dev(wallet, reason, label)
 }
@@ -463,7 +469,10 @@ pub fn list_blocked_devs() -> BlockedDevsListResult {
     match BlacklistStore::load() {
         Ok(store) => store.list_blocked_devs(),
         Err(e) => {
-            module::error("dev_blocklist", &format!("Failed to load dev blocklist: {}", e));
+            module::error(
+                "dev_blocklist",
+                &format!("Failed to load dev blocklist: {}", e),
+            );
             BlockedDevsListResult {
                 count: 0,
                 blocked_devs: vec![],

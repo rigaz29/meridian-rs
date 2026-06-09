@@ -131,7 +131,7 @@ impl Screener {
     /// Apply volatility from a longer timeframe if needed
     pub async fn apply_volatility_timeframe(
         &self,
-        pools: &mut Vec<RawPool>,
+        pools: &mut [RawPool],
         source_tf: &str,
     ) -> Result<()> {
         let vol_tf = get_volatility_timeframe(source_tf);
