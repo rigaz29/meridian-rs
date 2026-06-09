@@ -38,6 +38,15 @@ enum ReplCommandOutcome {
     Exit,
 }
 
+fn health_response() -> String {
+    let body = r#"{"status":"ok","version":"0.2.0"}"#;
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    )
+}
+
 async fn run_repl_command(
     line: &str,
     config: &config::Config,
@@ -531,9 +540,10 @@ async fn main() -> Result<()> {
             tokio::select! {
                 accept = listener.accept() => {
                     if let Ok((mut stream, _)) = accept {
-                        let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"status\":\"ok\",\"version\":\"0.2.0\"}\r\n";
+                        let resp = health_response();
                         use tokio::io::AsyncWriteExt;
                         let _ = stream.write_all(resp.as_bytes()).await;
+                        let _ = stream.shutdown().await;
                     }
                 }
                 _ = shutdown_health.changed() => {
@@ -672,5 +682,14 @@ mod repl_tests {
         assert!(!output.contains("Would run management cycle"));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn health_response_has_content_length_for_clean_curl_smoke() {
+        let response = health_response();
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("Content-Length: 33"));
+        assert!(response.ends_with(r#"{"status":"ok","version":"0.2.0"}"#));
     }
 }
