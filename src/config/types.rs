@@ -566,16 +566,6 @@ mod tests {
     use super::Config;
 
     #[test]
-    fn parses_example_config_without_explicit_strategy() {
-        let raw = include_str!("../../user-config.example.json");
-        let config: Config = serde_json::from_str(raw).expect("example config should parse");
-
-        assert_eq!(config.strategy.min_bins_below, 15);
-        assert_eq!(config.strategy.max_bins_below, 50);
-        assert_eq!(config.strategy.min_safe_bins_below, 35);
-    }
-
-    #[test]
     fn default_config_enables_darwin_signal_weighting() {
         let config = Config::default();
 

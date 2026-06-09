@@ -101,15 +101,6 @@ impl StartupEnv {
 pub fn startup_report(config: &Config, state_path: &str, env: &StartupEnv) -> StartupReport {
     let mut checks = Vec::new();
 
-    checks.push(if env.get_non_empty("MERIDIAN_CONFIG_PATH").is_some() {
-        StartupCheck::ok("config_path", "MERIDIAN_CONFIG_PATH is set")
-    } else {
-        StartupCheck::warn(
-            "config_path",
-            "MERIDIAN_CONFIG_PATH is not set; runtime will rely on ~/.meridian/user-config.json or repo-local user-config.json",
-        )
-    });
-
     checks.push(
         if Path::new(state_path)
             .parent()
@@ -364,7 +355,6 @@ mod tests {
         assert!(report.has_check("wallet_address", StartupCheckStatus::Warn));
         assert!(report.has_check("llm_api_key", StartupCheckStatus::Warn));
         assert!(report.has_check("rpc_url", StartupCheckStatus::Warn));
-        assert!(report.has_check("config_path", StartupCheckStatus::Warn));
     }
 
     #[test]
@@ -378,7 +368,6 @@ mod tests {
         let env = StartupEnv::from_pairs([
             ("WALLET_PRIVATE_KEY", "wallet-secret"),
             ("MERIDIAN_WALLET", "wallet-address"),
-            ("MERIDIAN_CONFIG_PATH", "user-config.json"),
         ]);
         let report = startup_report(&config, "state.json", &env);
 

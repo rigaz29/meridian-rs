@@ -3,7 +3,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-use crate::config::{load_config, resolve_config_path, save_config, Config};
+use crate::config::Config;
 use crate::cycle::{run_management_cycle, run_screening_cycle};
 use crate::lessons::{EvolutionConfig, LessonStore, PerformanceInput};
 use crate::llm::LlmClient;
@@ -18,12 +18,6 @@ use crate::tools::dlmm::{
 use crate::tools::screening::Screener;
 use crate::tools::study::study_top_lpers;
 use crate::tools::wallet::{get_wallet_balances, swap_token};
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum ConfigAction {
-    Get { key: Option<String> },
-    Set { key: String, value: String },
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LessonAction {
@@ -139,10 +133,7 @@ pub enum CliCommand {
         output_dir: Option<String>,
         force: bool,
     },
-    Config {
-        action: ConfigAction,
-        file: Option<String>,
-    },
+    Config,
     Lessons {
         action: LessonAction,
     },
@@ -226,7 +217,6 @@ pub struct SetupSummary {
 }
 
 const ENV_TEMPLATE: &str = include_str!("../.env.example");
-const USER_CONFIG_TEMPLATE: &str = include_str!("../user-config.example.json");
 
 impl CliOutput {
     pub fn render(&self) -> Result<String> {
@@ -246,7 +236,7 @@ pub fn help_text() -> String {
         "",
         "Core runtime",
         "  meridian setup [--dir <path>] [--force]",
-        "      Generate .env and user-config.json templates.",
+        "      Generate .env template.",
         "  meridian status",
         "      Print active-position summary as JSON.",
         "  meridian screen [--wallet <addr>] [--wallet-sol <sol>]",
@@ -266,8 +256,6 @@ pub fn help_text() -> String {
         "  meridian swap --from <mint> --amount <tokens>",
         "",
         "State & learning",
-        "  meridian config get [key] [--file <path>]",
-        "  meridian config set <key> <value> [--file <path>]",
         "  meridian lessons list|add|pin|unpin|clear|prompt ...",
         "  meridian performance summary|list|record ...",
         "  meridian evolve",
@@ -294,7 +282,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<Option<CliCommand>> {
             output_dir: optional_flag(tail, &["--dir", "--output-dir"]),
             force: has_flag(tail, "--force"),
         })),
-        "config" => parse_config_args(tail).map(Some),
+        "config" => Ok(Some(CliCommand::Config)),
         "lessons" | "lesson" => parse_lessons_args(tail).map(Some),
         "performance" | "perf" => parse_performance_args(tail).map(Some),
         "evolve" => Ok(Some(CliCommand::Evolve)),
@@ -376,53 +364,6 @@ pub fn parse_cli_args(args: &[String]) -> Result<Option<CliCommand>> {
         })),
         _ => Err(anyhow!("unknown command '{}'. Use 'help'.", command)),
     }
-}
-
-fn parse_config_args(args: &[String]) -> Result<CliCommand> {
-    let file = required_flag(args, &["--file", "--config"])?;
-    let mut positionals = Vec::new();
-    let mut index = 0usize;
-    while index < args.len() {
-        let arg = &args[index];
-        if matches!(arg.as_str(), "--file" | "--config") {
-            if args.get(index + 1).is_none() {
-                return Err(anyhow!("{} requires a value", arg));
-            }
-            index += 2;
-            continue;
-        }
-        if arg.starts_with("--file=") || arg.starts_with("--config=") {
-            index += 1;
-            continue;
-        }
-        positionals.push(arg.clone());
-        index += 1;
-    }
-
-    let action = match positionals.first().map(String::as_str) {
-        Some("get") => ConfigAction::Get {
-            key: positionals.get(1).cloned(),
-        },
-        Some("set") => ConfigAction::Set {
-            key: positionals
-                .get(1)
-                .cloned()
-                .ok_or_else(|| anyhow!("config set requires <key> <value>"))?,
-            value: positionals
-                .get(2)
-                .cloned()
-                .ok_or_else(|| anyhow!("config set requires <key> <value>"))?,
-        },
-        Some(other) => {
-            return Err(anyhow!(
-                "unknown config action '{}'. Use get or set.",
-                other
-            ))
-        }
-        None => return Err(anyhow!("config requires get or set")),
-    };
-
-    Ok(CliCommand::Config { action, file })
 }
 
 fn parse_lessons_args(args: &[String]) -> Result<CliCommand> {
@@ -614,33 +555,24 @@ fn parse_strategy_args(args: &[String]) -> Result<CliCommand> {
 pub fn run_setup_command(output_dir: impl AsRef<Path>, force: bool) -> Result<SetupSummary> {
     let output_dir = output_dir.as_ref();
     let env_path = output_dir.join(".env");
-    let config_path = output_dir.join("user-config.json");
 
-    let mut existing = Vec::new();
-    if env_path.exists() {
-        existing.push(env_path.display().to_string());
-    }
-    if config_path.exists() {
-        existing.push(config_path.display().to_string());
-    }
-    if !force && !existing.is_empty() {
+    if !force && env_path.exists() {
         return Err(anyhow!(
             "setup target already exists: {} (pass --force to overwrite)",
-            existing.join(", ")
+            env_path.display()
         ));
     }
 
     std::fs::create_dir_all(output_dir)?;
     std::fs::write(&env_path, ENV_TEMPLATE)?;
-    std::fs::write(&config_path, USER_CONFIG_TEMPLATE)?;
 
     Ok(SetupSummary {
         success: true,
         env_path,
-        config_path,
+        config_path: PathBuf::new(),
         env_written: true,
-        config_written: true,
-        message: "Generated .env and user-config.json templates".to_string(),
+        config_written: false,
+        message: "Generated .env template".to_string(),
     })
 }
 
@@ -648,7 +580,7 @@ pub fn command_name(command: &CliCommand) -> &'static str {
     match command {
         CliCommand::Help => "help",
         CliCommand::Setup { .. } => "setup",
-        CliCommand::Config { .. } => "config",
+        CliCommand::Config => "config",
         CliCommand::Lessons { .. } => "lessons",
         CliCommand::Performance { .. } => "performance",
         CliCommand::Evolve => "evolve",
@@ -681,96 +613,6 @@ pub fn json_command_output(command: &str, data: Value) -> CliOutput {
 
 fn json_command_result(command: &str, data: impl Serialize) -> Result<CliOutput> {
     Ok(json_command_output(command, serde_json::to_value(data)?))
-}
-
-pub fn run_config_command(
-    action: ConfigAction,
-    current_config: &Config,
-    file: Option<&Path>,
-) -> Result<CliOutput> {
-    let config_path = resolve_config_path(file.and_then(Path::to_str));
-    let config = if file.is_some() {
-        load_config(config_path.to_str())?
-    } else {
-        current_config.clone()
-    };
-
-    match action {
-        ConfigAction::Get { key } => {
-            let value = config_value_at(&config, key.as_deref())?;
-            Ok(json_command_output(
-                "config",
-                json!({
-                    "action": "get",
-                    "key": key,
-                    "value": value,
-                    "configPath": config_path,
-                }),
-            ))
-        }
-        ConfigAction::Set { key, value } => {
-            let parsed_value = parse_config_value(&value);
-            let mut serialized = serde_json::to_value(&config)?;
-            set_config_value_at(&mut serialized, &key, parsed_value.clone())?;
-            let updated: Config = serde_json::from_value(serialized)?;
-            save_config(&updated, config_path.to_str())?;
-            Ok(json_command_output(
-                "config",
-                json!({
-                    "action": "set",
-                    "key": key,
-                    "value": parsed_value,
-                    "configPath": config_path,
-                }),
-            ))
-        }
-    }
-}
-
-fn config_value_at(config: &Config, key: Option<&str>) -> Result<Value> {
-    let value = serde_json::to_value(config)?;
-    let Some(key) = key.filter(|key| !key.trim().is_empty()) else {
-        return Ok(value);
-    };
-
-    let mut cursor = &value;
-    for part in key.split('.') {
-        cursor = cursor
-            .get(part)
-            .ok_or_else(|| anyhow!("unknown config key '{}'", key))?;
-    }
-    Ok(cursor.clone())
-}
-
-fn set_config_value_at(config: &mut Value, key: &str, new_value: Value) -> Result<()> {
-    let parts: Vec<&str> = key.split('.').filter(|part| !part.is_empty()).collect();
-    if parts.is_empty() {
-        return Err(anyhow!("config key cannot be empty"));
-    }
-
-    let mut cursor = config;
-    for part in &parts[..parts.len() - 1] {
-        cursor = cursor
-            .get_mut(*part)
-            .ok_or_else(|| anyhow!("unknown config key '{}'", key))?;
-        if !cursor.is_object() {
-            return Err(anyhow!("config key '{}' is not an object", part));
-        }
-    }
-
-    let leaf = parts[parts.len() - 1];
-    let Some(object) = cursor.as_object_mut() else {
-        return Err(anyhow!("config parent for '{}' is not an object", key));
-    };
-    if !object.contains_key(leaf) {
-        return Err(anyhow!("unknown config key '{}'", key));
-    }
-    object.insert(leaf.to_string(), new_value);
-    Ok(())
-}
-
-fn parse_config_value(raw: &str) -> Value {
-    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
 }
 
 fn data_dir_for_state(state_path: &str) -> PathBuf {
@@ -1323,8 +1165,8 @@ pub async fn run_cli_command(
                 output_dir, force,
             )?)?))
         }
-        CliCommand::Config { action, file } => {
-            run_config_command(action, config, file.as_deref().map(Path::new))
+        CliCommand::Config => {
+            Ok(CliOutput::Text("config command is no longer supported; config is now hardcoded in defaults.rs".to_string()))
         }
         CliCommand::Lessons { action } => run_lessons_command(action, state_path),
         CliCommand::Performance { action } => run_performance_command(action, state_path),
@@ -1688,31 +1530,6 @@ mod tests {
     }
 
     #[test]
-    fn setup_generates_env_and_user_config_templates() {
-        let dir = unique_test_dir("setup-generates");
-        let summary = run_setup_command(&dir, false).expect("setup should write templates");
-
-        let env_path = dir.join(".env");
-        let config_path = dir.join("user-config.json");
-        assert_eq!(summary.env_path, env_path);
-        assert_eq!(summary.config_path, config_path);
-        assert!(summary.env_written);
-        assert!(summary.config_written);
-
-        let env = std::fs::read_to_string(&env_path).expect(".env should be readable");
-        assert!(env.contains("DRY_RUN=true"));
-        assert!(env.contains("WALLET_PRIVATE_KEY="));
-        assert!(env.contains("LLM_BASE_URL=https://openrouter.ai/api/v1"));
-
-        let config = std::fs::read_to_string(&config_path).expect("config should be readable");
-        let parsed: serde_json::Value = serde_json::from_str(&config).expect("valid json config");
-        assert_eq!(parsed["screening"]["timeframe"], "5m");
-        assert_eq!(parsed["management"]["deployAmountSol"], 0.5);
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
     fn setup_refuses_to_overwrite_existing_files_without_force() {
         let dir = unique_test_dir("setup-no-overwrite");
         std::fs::create_dir_all(&dir).expect("test dir should be created");
@@ -1788,103 +1605,6 @@ mod tests {
                 wallet: Some("Wallet111".to_string()),
             })
         );
-    }
-
-    #[test]
-    fn parse_config_get_set_subcommands() {
-        assert_eq!(
-            parse_cli_args(&args(&[
-                "meridian",
-                "config",
-                "get",
-                "management.deployAmountSol",
-                "--file",
-                "/tmp/user-config.json",
-            ]))
-            .unwrap(),
-            Some(CliCommand::Config {
-                file: Some("/tmp/user-config.json".to_string()),
-                action: ConfigAction::Get {
-                    key: Some("management.deployAmountSol".to_string()),
-                },
-            })
-        );
-        assert_eq!(
-            parse_cli_args(&args(&[
-                "meridian",
-                "config",
-                "set",
-                "management.deployAmountSol",
-                "0.25",
-                "--file=/tmp/user-config.json",
-            ]))
-            .unwrap(),
-            Some(CliCommand::Config {
-                file: Some("/tmp/user-config.json".to_string()),
-                action: ConfigAction::Set {
-                    key: "management.deployAmountSol".to_string(),
-                    value: "0.25".to_string(),
-                },
-            })
-        );
-    }
-
-    #[test]
-    fn config_get_reads_nested_value() {
-        let config = Config::default();
-        let output = run_config_command(
-            ConfigAction::Get {
-                key: Some("management.deployAmountSol".to_string()),
-            },
-            &config,
-            None,
-        )
-        .expect("config get should read nested value");
-        let rendered = output.render().expect("json output should render");
-        let parsed: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
-
-        assert_eq!(parsed["success"], true);
-        assert_eq!(parsed["command"], "config");
-        assert_eq!(parsed["data"]["action"], "get");
-        assert_eq!(parsed["data"]["key"], "management.deployAmountSol");
-        assert_eq!(parsed["data"]["value"], 0.5);
-    }
-
-    #[test]
-    fn config_set_updates_nested_value_and_persists_file() {
-        let dir = unique_test_dir("config-set");
-        std::fs::create_dir_all(&dir).expect("test dir should be created");
-        let path = dir.join("user-config.json");
-        std::fs::write(
-            &path,
-            serde_json::to_string_pretty(&Config::default()).expect("config should serialize"),
-        )
-        .expect("seed config should be written");
-
-        let output = run_config_command(
-            ConfigAction::Set {
-                key: "management.deployAmountSol".to_string(),
-                value: "0.25".to_string(),
-            },
-            &Config::default(),
-            Some(path.as_path()),
-        )
-        .expect("config set should persist nested value");
-        let rendered = output.render().expect("json output should render");
-        let parsed: serde_json::Value = serde_json::from_str(&rendered).expect("valid JSON");
-        let saved: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(&path).expect("saved config should be readable"),
-        )
-        .expect("saved config should remain JSON");
-
-        assert_eq!(parsed["success"], true);
-        assert_eq!(parsed["command"], "config");
-        assert_eq!(parsed["data"]["action"], "set");
-        assert_eq!(parsed["data"]["key"], "management.deployAmountSol");
-        assert_eq!(parsed["data"]["value"], 0.25);
-        assert_eq!(saved["management"]["deployAmountSol"], 0.25);
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
