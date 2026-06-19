@@ -244,6 +244,32 @@ impl Screener {
 
         Ok(result)
     }
+
+    /// Override each candidate's `fees_sol` with GMGN's cumulative token fee
+    /// when a GMGN API key is configured. This is the primary `minTokenFeesSol`
+    /// signal; pools keep their pool/Jupiter fee figure on miss (faithful to the
+    /// original JS fallback behavior). No-op when GMGN is not configured.
+    pub async fn enrich_candidate_fees(
+        &self,
+        candidates: &mut [CondensedPool],
+        config: &crate::config::Config,
+    ) {
+        if !crate::tools::gmgn::has_gmgn_api_key(config) {
+            return;
+        }
+        for candidate in candidates.iter_mut() {
+            if candidate.base.mint.is_empty() {
+                continue;
+            }
+            if let Some(fees) =
+                crate::tools::gmgn::get_gmgn_token_fees(&candidate.base.mint, config).await
+            {
+                if let Some(total) = fees.total_fee {
+                    candidate.fees_sol = total;
+                }
+            }
+        }
+    }
 }
 
 fn condense_raw_pool(pool: &RawPool) -> CondensedPool {

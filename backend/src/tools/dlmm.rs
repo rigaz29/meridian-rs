@@ -297,15 +297,24 @@ pub struct RangeCoverage {
     pub active_price: Option<f64>,
 }
 
-fn estimate_range_coverage(active_price: f64, price_range: Option<&PriceRange>) -> Option<RangeCoverage> {
+fn estimate_range_coverage(
+    active_price: f64,
+    price_range: Option<&PriceRange>,
+) -> Option<RangeCoverage> {
     let range = price_range?;
     if !active_price.is_finite() || active_price <= 0.0 || range.min <= 0.0 || range.max <= 0.0 {
         return None;
     }
 
     Some(RangeCoverage {
-        downside_pct: Some(round(((active_price - range.min) / active_price) * 100.0, 4)),
-        upside_pct: Some(round(((range.max - active_price) / active_price) * 100.0, 4)),
+        downside_pct: Some(round(
+            ((active_price - range.min) / active_price) * 100.0,
+            4,
+        )),
+        upside_pct: Some(round(
+            ((range.max - active_price) / active_price) * 100.0,
+            4,
+        )),
         width_pct: Some(round(((range.max - range.min) / range.min) * 100.0, 4)),
         active_price: Some(round(active_price, 12)),
     })
@@ -1536,7 +1545,11 @@ mod tests {
 
     #[tokio::test]
     async fn deploy_live_path_uses_native_meteora_before_js_cli() {
-        let _guard = EnvGuard::clear(&["DRY_RUN", "WALLET_PRIVATE_KEY", "MERIDIAN_WALLET_PRIVATE_KEY"]);
+        let _guard = EnvGuard::clear(&[
+            "DRY_RUN",
+            "WALLET_PRIVATE_KEY",
+            "MERIDIAN_WALLET_PRIVATE_KEY",
+        ]);
         let pool = "22222222222222222222222222222222";
         let config = Config {
             dry_run: false,

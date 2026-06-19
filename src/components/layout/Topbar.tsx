@@ -11,7 +11,7 @@ export const Topbar = ({ activeWorkspace, onWorkspaceChange }: TopbarProps) => (
     <div className="top-left">
       <div className="brand-mark">A</div>
       <nav className="workspace-tabs" aria-label="Workspaces">
-        {[1, 2, 3, 4, 5].map((item) => (
+        {[1, 2].map((item) => (
           <button type="button" data-workspace-target={item} className={item === activeWorkspace ? 'active' : ''} onClick={() => onWorkspaceChange(item)} key={item}>{item}</button>
         ))}
       </nav>

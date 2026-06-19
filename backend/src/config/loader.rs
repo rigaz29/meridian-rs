@@ -384,6 +384,26 @@ fn config_from_flat_js_value(value: &Value) -> Config {
         }
     }
 
+    // GMGN is a nested object even in the original flat JS config.
+    if let Some(gmgn) = obj.get("gmgn").and_then(Value::as_object) {
+        set_opt_string(gmgn, "apiKey", &mut config.gmgn.api_key);
+        set_string(gmgn, "baseUrl", &mut config.gmgn.base_url);
+        set_u64(gmgn, "requestDelayMs", &mut config.gmgn.request_delay_ms);
+        set_u32(gmgn, "maxRetries", &mut config.gmgn.max_retries);
+    }
+
+    // HiveMind: nested object in the original flat config, plus a top-level
+    // `agentId` key that the original persists at the root.
+    if let Some(hive) = obj.get("hiveMind").and_then(Value::as_object) {
+        set_opt_string(hive, "url", &mut config.hive_mind.url);
+        set_opt_string(hive, "apiKey", &mut config.hive_mind.api_key);
+        set_opt_string(hive, "agentId", &mut config.hive_mind.agent_id);
+        set_string(hive, "pullMode", &mut config.hive_mind.pull_mode);
+    }
+    if config.hive_mind.agent_id.is_none() {
+        set_opt_string(obj, "agentId", &mut config.hive_mind.agent_id);
+    }
+
     config
 }
 
@@ -442,6 +462,28 @@ fn apply_env_overrides(config: &mut Config) {
         if let Ok(parsed) = fee_bps.trim().parse::<u32>() {
             config.jupiter.referral_fee_bps = parsed;
         }
+    }
+    if let Some(key) = env_non_empty("GMGN_API_KEY") {
+        config.gmgn.api_key = Some(key);
+    }
+    if let Some(base) = env_non_empty("GMGN_BASE_URL") {
+        config.gmgn.base_url = base;
+    }
+    if let Ok(delay) = std::env::var("GMGN_REQUEST_DELAY_MS") {
+        if let Ok(parsed) = delay.trim().parse::<u64>() {
+            config.gmgn.request_delay_ms = parsed;
+        }
+    }
+    if let Some(url) = env_non_empty("HIVE_MIND_URL").or_else(|| env_non_empty("HIVEMIND_URL")) {
+        config.hive_mind.url = Some(url);
+    }
+    if let Some(key) =
+        env_non_empty("HIVE_MIND_API_KEY").or_else(|| env_non_empty("HIVEMIND_API_KEY"))
+    {
+        config.hive_mind.api_key = Some(key);
+    }
+    if let Some(mode) = env_non_empty("HIVE_MIND_PULL_MODE") {
+        config.hive_mind.pull_mode = mode;
     }
 }
 
@@ -645,6 +687,12 @@ mod tests {
         "JUPITER_API_KEY",
         "JUPITER_REFERRAL_ACCOUNT",
         "JUPITER_REFERRAL_FEE_BPS",
+        "GMGN_API_KEY",
+        "GMGN_BASE_URL",
+        "GMGN_REQUEST_DELAY_MS",
+        "HIVE_MIND_URL",
+        "HIVE_MIND_API_KEY",
+        "HIVE_MIND_PULL_MODE",
     ];
 
     struct EnvGuard {

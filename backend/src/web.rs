@@ -9,7 +9,6 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use tower_http::cors::{Any, CorsLayer};
 
 use crate::config::llm_config::LlmCredentials;
 use crate::config::{load_config, meridian_data_path, resolve_config_path, save_config, Config};
@@ -19,7 +18,9 @@ use crate::llm::{FunctionCall, LlmClient, ToolCall};
 use crate::state::pool_memory::PoolMemoryStore;
 use crate::state::positions::PositionState;
 use crate::tools::blacklist::BlacklistStore;
-use crate::tools::executor::{append_decision_log_entry, read_recent_decisions_from_path, ToolExecutor};
+use crate::tools::executor::{
+    append_decision_log_entry, read_recent_decisions_from_path, ToolExecutor,
+};
 use crate::tools::screening::Screener;
 use crate::tools::wallet::get_wallet_balances;
 
@@ -45,7 +46,11 @@ impl Default for WebAppState {
 
 pub async fn start_web_server() -> anyhow::Result<()> {
     let app = build_router(WebAppState::default());
-    let addr = std::env::var("MERIDIAN_WEB_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
+    // Internal API service: bind to loopback by default so it is never exposed
+    // on the network. The Next.js dashboard reaches it server-side via its proxy
+    // (MERIDIAN_BACKEND_URL). Override MERIDIAN_WEB_ADDR only for deliberate,
+    // trusted setups.
+    let addr = std::env::var("MERIDIAN_WEB_ADDR").unwrap_or_else(|_| "127.0.0.1:3001".to_string());
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("[Meridian HyperOS] Running on http://{addr}");
@@ -68,12 +73,9 @@ pub fn build_router(state: WebAppState) -> Router {
         .route("/api/performance", get(get_performance))
         .route("/api/blacklist", get(get_blacklist))
         .with_state(state)
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
+    // No CORS layer: this backend is reached only server-side by the Next.js
+    // proxy, so it intentionally emits no cross-origin headers. Browsers cannot
+    // call it directly, keeping the API invisible to the frontend/client.
 }
 
 async fn main_page() -> Html<&'static str> {
@@ -900,7 +902,15 @@ async fn run_control_action(state: &WebAppState, request: ControlRequest) -> Res
             );
             let llm = LlmClient::new(&creds.api_key, &creds.base_url);
             let wallet_sol = request.wallet_sol.unwrap_or(0.0);
-            let report = run_screening_cycle(&config, &llm, &mut positions, &mut pool_memory, wallet_sol, &wallet).await?;
+            let report = run_screening_cycle(
+                &config,
+                &llm,
+                &mut positions,
+                &mut pool_memory,
+                wallet_sol,
+                &wallet,
+            )
+            .await?;
             if should_append_screening_no_deploy_decision(&report) {
                 let decision_path = data_dir_for_state(&state.state_path).join("decision-log.json");
                 append_decision_log_entry(

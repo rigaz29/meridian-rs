@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use crate::config::{meridian_data_path, Config};
 use crate::lessons::{LessonStore, PerformanceInput};
 use crate::llm::ToolCall;
-use crate::state::pool_memory::PoolMemoryStore;
 use crate::state::pool_memory::PoolDeployInput;
+use crate::state::pool_memory::PoolMemoryStore;
 use crate::state::positions::PositionState;
 use crate::tools::dlmm::{
     claim_fees, close_position, get_active_bin, get_my_positions, get_position_pnl,
@@ -204,10 +204,17 @@ fn structured_decision_fields(tool: &str, args: &Value, result: &str, success: b
     let parsed = parse_result_value(result);
     let pool = json_str(args, &["pool_address", "pool"])
         .or_else(|| parsed.get("pool").and_then(Value::as_str));
-    let position = json_str(args, &["position_id", "position_address", "positionAddress"])
-        .or_else(|| parsed.get("position").and_then(Value::as_str));
-    let pool_name = json_str(args, &["pool_name", "name"])
-        .or_else(|| parsed.get("poolName").or_else(|| parsed.get("pool_name")).and_then(Value::as_str));
+    let position = json_str(
+        args,
+        &["position_id", "position_address", "positionAddress"],
+    )
+    .or_else(|| parsed.get("position").and_then(Value::as_str));
+    let pool_name = json_str(args, &["pool_name", "name"]).or_else(|| {
+        parsed
+            .get("poolName")
+            .or_else(|| parsed.get("pool_name"))
+            .and_then(Value::as_str)
+    });
     let decision_type = match tool {
         "deploy_position" if success => "deploy",
         "deploy_position" => "no_deploy",
@@ -703,7 +710,8 @@ impl ToolExecutor {
                         );
 
                         let lessons_path = meridian_data_path("lessons.json");
-                        let mut lessons = LessonStore::load(lessons_path.to_str().unwrap_or("lessons.json"))?;
+                        let mut lessons =
+                            LessonStore::load(lessons_path.to_str().unwrap_or("lessons.json"))?;
                         let signal_snapshot = pos
                             .signal_snapshot
                             .as_ref()
@@ -720,8 +728,58 @@ impl ToolExecutor {
                             signal_snapshot: &signal_snapshot,
                         });
                         lessons.save(lessons_path.to_str().unwrap_or("lessons.json"))?;
+
+                        // Broadcast the closed-position event to the HiveMind
+                        // (fire-and-forget; failures are logged and non-blocking).
+                        if crate::hivemind::is_enabled(&config.hive_mind) {
+                            let pnl_pct = pos
+                                .signal_snapshot
+                                .as_ref()
+                                .and_then(|s| s.get("pnlPct"))
+                                .and_then(Value::as_f64)
+                                .unwrap_or(0.0);
+                            let strategy = pos
+                                .signal_snapshot
+                                .as_ref()
+                                .and_then(|s| s.get("strategy"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string);
+                            let minutes_held =
+                                chrono::DateTime::parse_from_rfc3339(&pos.created_at)
+                                    .map(|start| {
+                                        (chrono::Utc::now()
+                                            .signed_duration_since(
+                                                start.with_timezone(&chrono::Utc),
+                                            )
+                                            .num_seconds()
+                                            as f64)
+                                            / 60.0
+                                    })
+                                    .unwrap_or(0.0)
+                                    .max(0.0);
+                            let event = crate::hivemind::PerformanceEvent {
+                                event_id: None,
+                                pool: Some(pos.pool_address.clone()),
+                                pool_name: pos.pool_name.clone(),
+                                base_mint: Some(pos.base_mint.clone()),
+                                strategy,
+                                close_reason: Some(reason.to_string()),
+                                pnl_usd: 0.0,
+                                pnl_pct,
+                                fees_earned_usd: pos.total_fees_claimed_usd,
+                                fees_earned_sol: pos.total_fees_claimed,
+                                minutes_held,
+                            };
+                            let hive_config = config.hive_mind.clone();
+                            tokio::spawn(async move {
+                                crate::hivemind::push_performance_event(&hive_config, &event).await;
+                            });
+                        }
                     } else if !lookup_id.is_empty() {
-                        warn("executor", &format!("close_position succeeded but {} was not tracked", lookup_id));
+                        warn(
+                            "executor",
+                            &format!("close_position succeeded but {} was not tracked", lookup_id),
+                        );
                     }
                 }
 
@@ -730,7 +788,8 @@ impl ToolExecutor {
                     if let Some(pos) = positions.positions.get(pid) {
                         let pool = pos.pool_address.clone();
                         let sym = pos.base_symbol.clone().unwrap_or_default();
-                        let note = "CLOSED low yield — avoid re-entry. Fees insufficient for TVL.".to_string();
+                        let note = "CLOSED low yield — avoid re-entry. Fees insufficient for TVL."
+                            .to_string();
                         pool_memory.add_note(&pool, &pos.base_mint, Some(&sym), &note);
                         info(
                             "executor",
@@ -746,7 +805,11 @@ impl ToolExecutor {
                             // Cooldown pool for 1 hour
                             pool_memory.set_pool_cooldown(&pos.pool_address, "loss_close", 60);
                             // Cooldown token too
-                            pool_memory.set_base_mint_cooldown_minutes(&pos.base_mint, 60, "loss_close");
+                            pool_memory.set_base_mint_cooldown_minutes(
+                                &pos.base_mint,
+                                60,
+                                "loss_close",
+                            );
                             info(
                                 "executor",
                                 &format!("Set 1h cooldown on pool/token after {:.4} SOL loss", pnl),
@@ -938,7 +1001,33 @@ impl ToolExecutor {
                     .unwrap_or("https://api.mainnet-beta.solana.com");
                 let helius_key = config.api.helius_api_key.as_deref().unwrap_or("");
                 match get_wallet_balances(rpc, wallet, helius_key).await {
-                    Ok(balances) => Ok(serde_json::to_string_pretty(&balances)?),
+                    Ok(mut balances) => {
+                        // In dry-run, surface a simulated SOL balance when the real
+                        // one is below the deploy threshold so the full flow
+                        // (screen → decide → simulated deploy) can run without funds.
+                        let needed = config.management.deploy_amount_sol
+                            + config.management.gas_reserve
+                            + 0.5;
+                        if config.dry_run && balances.sol < needed {
+                            let simulated = needed.max(1.0);
+                            balances.sol = simulated;
+                            balances.sol_usd = simulated * balances.sol_price;
+                            balances.total_usd = balances.sol_usd;
+                            let mut value = serde_json::to_value(&balances)?;
+                            if let Some(map) = value.as_object_mut() {
+                                map.insert("dryRunSimulated".to_string(), Value::Bool(true));
+                                map.insert(
+                                    "dryRunNote".to_string(),
+                                    Value::String(format!(
+                                        "DRY_RUN: real balance below deploy threshold; reporting a simulated {:.2} SOL so the dry-run flow can proceed. No real funds involved.",
+                                        simulated
+                                    )),
+                                );
+                            }
+                            return Ok(serde_json::to_string_pretty(&value)?);
+                        }
+                        Ok(serde_json::to_string_pretty(&balances)?)
+                    }
                     Err(e) => Ok(format!("{{\"error\": \"{}\"}}", e)),
                 }
             }
@@ -995,7 +1084,12 @@ impl ToolExecutor {
                     .get_top_candidates_with_rejections(&config.screening, limit)
                     .await
                 {
-                    Ok(result) => Ok(serde_json::to_string_pretty(&result)?),
+                    Ok(mut result) => {
+                        self.screener
+                            .enrich_candidate_fees(&mut result.candidates, config)
+                            .await;
+                        Ok(serde_json::to_string_pretty(&result)?)
+                    }
                     Err(e) => Ok(format!("{{\"error\": \"{}\"}}", e)),
                 }
             }
@@ -1190,6 +1284,186 @@ impl ToolExecutor {
                 }
             }
 
+            // ── Lessons ────────────────────────────────────────
+            "add_lesson" => {
+                let content = args["content"].as_str().unwrap_or("");
+                if content.is_empty() {
+                    anyhow::bail!("content required");
+                }
+                let role = args["role"].as_str().unwrap_or("general");
+                let tags: Vec<String> = args["tags"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|t| t.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let path = meridian_data_path("lessons.json");
+                let path_str = path.to_str().unwrap_or("lessons.json");
+                let mut store = LessonStore::load(path_str)?;
+                store.add_with_meta(content, role, tags, 0.7, "manual");
+                store.save(path_str)?;
+                Ok(json!({"success": true, "message": "Lesson saved"}).to_string())
+            }
+            "list_lessons" => {
+                let role_filter = args["role"].as_str();
+                let limit = args["limit"].as_u64().unwrap_or(50).clamp(1, 200) as usize;
+                let path = meridian_data_path("lessons.json");
+                let store = LessonStore::load(path.to_str().unwrap_or("lessons.json"))?;
+                let lessons: Vec<&crate::lessons::Lesson> = store
+                    .lessons
+                    .iter()
+                    .filter(|l| match role_filter {
+                        Some(r) => l.role.as_deref() == Some(r),
+                        None => true,
+                    })
+                    .take(limit)
+                    .collect();
+                Ok(serde_json::to_string_pretty(&json!({
+                    "success": true,
+                    "count": lessons.len(),
+                    "lessons": lessons,
+                }))?)
+            }
+            "pin_lesson" | "unpin_lesson" => {
+                let id = args["id"].as_str().unwrap_or("");
+                if id.is_empty() {
+                    anyhow::bail!("id required");
+                }
+                let path = meridian_data_path("lessons.json");
+                let path_str = path.to_str().unwrap_or("lessons.json");
+                let mut store = LessonStore::load(path_str)?;
+                let changed = if name == "pin_lesson" {
+                    store.pin(id)
+                } else {
+                    store.unpin(id)
+                };
+                if changed {
+                    store.save(path_str)?;
+                }
+                Ok(json!({
+                    "success": changed,
+                    "message": if changed {
+                        format!("Lesson {} {}", id, if name == "pin_lesson" { "pinned" } else { "unpinned" })
+                    } else {
+                        format!("Lesson {} not found", id)
+                    },
+                })
+                .to_string())
+            }
+            "clear_lessons" => {
+                let path = meridian_data_path("lessons.json");
+                let path_str = path.to_str().unwrap_or("lessons.json");
+                let mut store = LessonStore::load(path_str)?;
+                store.clear();
+                store.save(path_str)?;
+                Ok(json!({"success": true, "message": "All lessons cleared"}).to_string())
+            }
+
+            // ── Smart wallets ──────────────────────────────────
+            "add_smart_wallet" => {
+                let address = args["address"].as_str().unwrap_or("");
+                let label = args["label"].as_str().unwrap_or("");
+                if address.is_empty() || label.is_empty() {
+                    anyhow::bail!("address and label required");
+                }
+                let category = args["category"].as_str();
+                let wallet_type = args["type"].as_str();
+                let mut store = crate::tools::smart_wallets::SmartWalletStore::load()?;
+                let result = store.add_wallet(address, label, category, wallet_type)?;
+                Ok(serde_json::to_string_pretty(&result)?)
+            }
+            "list_smart_wallets" => {
+                let store = crate::tools::smart_wallets::SmartWalletStore::load()?;
+                Ok(serde_json::to_string_pretty(&store.list_wallets())?)
+            }
+            "remove_smart_wallet" => {
+                let address = args["address"].as_str().unwrap_or("");
+                if address.is_empty() {
+                    anyhow::bail!("address required");
+                }
+                let mut store = crate::tools::smart_wallets::SmartWalletStore::load()?;
+                let result = store.remove_wallet(address)?;
+                Ok(serde_json::to_string_pretty(&result)?)
+            }
+
+            // ── Blacklist / deployer blocklist ─────────────────
+            "list_blacklist" => Ok(serde_json::to_string_pretty(
+                &crate::tools::blacklist::list_blacklist(),
+            )?),
+            "remove_from_blacklist" => {
+                let mint = args["mint"].as_str().unwrap_or("");
+                if mint.is_empty() {
+                    anyhow::bail!("mint required");
+                }
+                match crate::tools::blacklist::remove_from_blacklist(mint) {
+                    Ok(result) => Ok(serde_json::to_string_pretty(&result)?),
+                    Err(e) => Ok(format!("Error: {}", e)),
+                }
+            }
+            "block_deployer" => {
+                let wallet = args["wallet"].as_str().unwrap_or("");
+                if wallet.is_empty() {
+                    anyhow::bail!("wallet required");
+                }
+                let reason = args["reason"].as_str();
+                let label = args["label"].as_str();
+                match crate::tools::blacklist::block_dev(wallet, reason, label) {
+                    Ok(result) => Ok(serde_json::to_string_pretty(&result)?),
+                    Err(e) => Ok(format!("Error: {}", e)),
+                }
+            }
+            "list_blocked_deployers" => Ok(serde_json::to_string_pretty(
+                &crate::tools::blacklist::list_blocked_devs(),
+            )?),
+
+            // ── Pool detail / position note ────────────────────
+            "get_pool_detail" => {
+                let pool = args["pool_address"].as_str().unwrap_or("");
+                if pool.is_empty() {
+                    anyhow::bail!("pool_address required");
+                }
+                let timeframe = config.screening.timeframe.as_str();
+                match self.screener.get_pool_detail(pool, timeframe).await {
+                    Ok(Some(detail)) => Ok(serde_json::to_string_pretty(&detail)?),
+                    Ok(None) => Ok(json!({
+                        "success": false,
+                        "error": format!("Pool {} not found", pool),
+                    })
+                    .to_string()),
+                    Err(e) => Ok(format!("{{\"error\": \"{}\"}}", e)),
+                }
+            }
+            "set_position_note" => {
+                let note = args["note"].as_str().unwrap_or("");
+                if note.is_empty() {
+                    anyhow::bail!("note required");
+                }
+                let Some(position) = find_tracked_position(args, positions).map(|p| p.id.clone())
+                else {
+                    anyhow::bail!("position not found in tracked state");
+                };
+                let ok = positions.set_instruction(&position, Some(note));
+                if ok {
+                    let state_path = std::env::var("MERIDIAN_STATE_PATH").unwrap_or_else(|_| {
+                        meridian_data_path("meridian-state.json")
+                            .to_string_lossy()
+                            .into_owned()
+                    });
+                    positions.save(&state_path)?;
+                }
+                Ok(json!({
+                    "success": ok,
+                    "message": if ok {
+                        format!("Instruction set for position {}", position)
+                    } else {
+                        "Position not found".to_string()
+                    },
+                })
+                .to_string())
+            }
+
             // ── Mutable tools (stubs — need SDK) ───────────────
             "deploy_position" => {
                 let pool = args["pool_address"].as_str().unwrap_or("");
@@ -1208,16 +1482,16 @@ impl ToolExecutor {
                     Ok(result) => {
                         if result.success {
                             if let Some(position_id) = result.position.clone() {
-                                if !positions.positions.contains_key(&position_id) && !pool.is_empty() {
+                                if !positions.positions.contains_key(&position_id)
+                                    && !pool.is_empty()
+                                {
                                     let pool_name = result
                                         .pool_name
                                         .clone()
                                         .or_else(|| args["pool_name"].as_str().map(str::to_string))
                                         .or_else(|| args["name"].as_str().map(str::to_string));
-                                    let base_symbol = args["symbol"]
-                                        .as_str()
-                                        .map(str::to_string)
-                                        .or_else(|| {
+                                    let base_symbol =
+                                        args["symbol"].as_str().map(str::to_string).or_else(|| {
                                             pool_name
                                                 .as_deref()
                                                 .and_then(|name| name.split('-').next())
@@ -1230,18 +1504,30 @@ impl ToolExecutor {
                                         id: position_id,
                                         pool_address: pool.to_string(),
                                         pool_name,
-                                        base_mint: args["base_mint"].as_str().unwrap_or(pool).to_string(),
+                                        base_mint: args["base_mint"]
+                                            .as_str()
+                                            .unwrap_or(pool)
+                                            .to_string(),
                                         base_symbol,
                                         strategy: strategy.map(str::to_string),
                                         amount_x: result.amount_x.unwrap_or(0.0),
-                                        active_bin_at_deploy: result.bin_range.as_ref().and_then(|range| range.active),
+                                        active_bin_at_deploy: result
+                                            .bin_range
+                                            .as_ref()
+                                            .and_then(|range| range.active),
                                         bin_step: result.bin_step,
                                         volatility: args["volatility"].as_f64(),
                                         fee_tvl_ratio: args["fee_tvl_ratio"].as_f64(),
                                         organic_score: args["organic_score"].as_f64(),
                                         initial_value_usd: args["initial_value_usd"].as_f64(),
-                                        lower_bin: bin_range.as_ref().map(|range| range.min).unwrap_or(0),
-                                        upper_bin: bin_range.as_ref().map(|range| range.max).unwrap_or(0),
+                                        lower_bin: bin_range
+                                            .as_ref()
+                                            .map(|range| range.min)
+                                            .unwrap_or(0),
+                                        upper_bin: bin_range
+                                            .as_ref()
+                                            .map(|range| range.max)
+                                            .unwrap_or(0),
                                         amount_sol: amount,
                                         created_at: chrono::Utc::now().to_rfc3339(),
                                         signal_snapshot: Some(json!({
@@ -1300,7 +1586,10 @@ impl ToolExecutor {
                                 base_symbol,
                                 strategy: strategy.map(str::to_string),
                                 amount_x: result.amount_x.unwrap_or(0.0),
-                                active_bin_at_deploy: result.bin_range.as_ref().and_then(|range| range.active),
+                                active_bin_at_deploy: result
+                                    .bin_range
+                                    .as_ref()
+                                    .and_then(|range| range.active),
                                 bin_step: result.bin_step,
                                 volatility: args["volatility"].as_f64(),
                                 fee_tvl_ratio: args["fee_tvl_ratio"].as_f64(),

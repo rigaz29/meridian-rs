@@ -546,11 +546,29 @@ pub async fn run_screening_cycle(
         return Ok(msg);
     }
 
-    let deploy_amount = compute_deploy_amount(config, wallet_sol);
+    let mut deploy_amount = compute_deploy_amount(config, wallet_sol);
     if deploy_amount <= 0.0 {
-        let msg = format!("Not enough SOL ({:.2}) to deploy.", wallet_sol);
-        info("cycle", &msg);
-        return Ok(msg);
+        if config.dry_run {
+            // Dry-run does not require real balance: simulate with the configured
+            // deploy size so the full screen → decide → simulated-deploy flow runs.
+            // The deploy transaction itself stays blocked by the dry-run guard.
+            deploy_amount = if config.management.deploy_amount_sol > 0.0 {
+                config.management.deploy_amount_sol
+            } else {
+                0.5
+            };
+            info(
+                "cycle",
+                &format!(
+                    "DRY_RUN: wallet balance {:.2} SOL is insufficient; simulating deploy amount {:.2} SOL",
+                    wallet_sol, deploy_amount
+                ),
+            );
+        } else {
+            let msg = format!("Not enough SOL ({:.2}) to deploy.", wallet_sol);
+            info("cycle", &msg);
+            return Ok(msg);
+        }
     }
 
     let active_strategy = crate::strategy_library::get_active_strategy()

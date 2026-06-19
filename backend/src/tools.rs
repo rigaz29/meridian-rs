@@ -5,6 +5,7 @@ pub mod definitions;
 pub mod discord_signals;
 pub mod dlmm;
 pub mod executor;
+pub mod gmgn;
 pub mod meteora_native;
 pub mod screening;
 pub mod smart_wallets;

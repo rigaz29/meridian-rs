@@ -55,6 +55,18 @@
     "agentMeridianKey": null,
     "lpAgentRelayEnabled": false
   },
+  "gmgn": {
+    "apiKey": null,
+    "baseUrl": "https://openapi.gmgn.ai",
+    "requestDelayMs": 2500,
+    "maxRetries": 2
+  },
+  "hiveMind": {
+    "url": null,
+    "apiKey": null,
+    "agentId": null,
+    "pullMode": "auto"
+  },
   "dualStrategy": {
     "enabled": false,
     "primaryPct": 0.6,

@@ -10,7 +10,8 @@ import { WeatherWidget } from '../widgets/WeatherWidget';
 import { MusicWidget } from '../widgets/MusicWidget';
 import { ActivityWidget } from '../widgets/ActivityWidget';
 import { CandidateWidget } from '../widgets/CandidateWidget';
-import { BackendApiReferenceWidget, BackendConfigWidget, BackendControlsWidget, BackendLessonsWidget, BackendStatusWidget, BackendWalletLogsWidget } from '../widgets/BackendControlWidgets';
+import { BackendControlsWidget, BackendStatusWidget } from '../widgets/BackendControlWidgets';
+import { TerminalConsole } from './TerminalConsole';
 import { cachedJson } from '../../lib/clientCache';
 
 type SystemInfo = {
@@ -29,7 +30,7 @@ type SystemInfo = {
   disks: Array<{ id: string; used: string; total: string; percent: number }>;
 };
 
-type WidgetId = 'profile' | 'positions' | 'trades' | 'weather' | 'music' | 'activity' | 'candidates' | 'backendStatus' | 'backendControls' | 'backendConfig' | 'backendWalletLogs' | 'backendLessons' | 'backendApi';
+type WidgetId = 'profile' | 'positions' | 'trades' | 'weather' | 'music' | 'activity' | 'candidates' | 'backendStatus' | 'backendControls';
 
 type WidgetLayout = {
   workspace: number;
@@ -52,10 +53,6 @@ const defaultWidgets: Record<WidgetId, WidgetLayout> = {
   activity: { workspace: 1, x: 1228, y: 594, width: 468, height: 554, minWidth: 360, minHeight: 280, z: 1 },
   backendStatus: { workspace: 2, x: 0, y: 0, width: 620, height: 360, minWidth: 420, minHeight: 300, z: 1 },
   backendControls: { workspace: 2, x: 636, y: 0, width: 720, height: 560, minWidth: 520, minHeight: 420, z: 1 },
-  backendConfig: { workspace: 3, x: 0, y: 0, width: 620, height: 560, minWidth: 440, minHeight: 420, z: 1 },
-  backendWalletLogs: { workspace: 3, x: 636, y: 0, width: 720, height: 560, minWidth: 500, minHeight: 420, z: 1 },
-  backendLessons: { workspace: 4, x: 0, y: 0, width: 900, height: 520, minWidth: 560, minHeight: 380, z: 1 },
-  backendApi: { workspace: 5, x: 0, y: 0, width: 880, height: 520, minWidth: 560, minHeight: 380, z: 1 },
 };
 
 const fallbackSystem: SystemInfo = {
@@ -481,7 +478,7 @@ export default function DashboardLayout() {
             <div className="color-strip"><em /><em /><em /><em /><em /><em /><em /><em /></div>
           </div>
         </div>
-        <div className="terminal-prompt"><b>meridian</b><span>~</span><i /></div>
+        <TerminalConsole />
       </div>
     </div>
   );
@@ -513,10 +510,6 @@ export default function DashboardLayout() {
           {widgets.activity.workspace === workspace ? dashboardWidget('activity', <ActivityWidget />) : null}
           {widgets.backendStatus.workspace === workspace ? dashboardWidget('backendStatus', <BackendStatusWidget />) : null}
           {widgets.backendControls.workspace === workspace ? dashboardWidget('backendControls', <BackendControlsWidget />) : null}
-          {widgets.backendConfig.workspace === workspace ? dashboardWidget('backendConfig', <BackendConfigWidget />) : null}
-          {widgets.backendWalletLogs.workspace === workspace ? dashboardWidget('backendWalletLogs', <BackendWalletLogsWidget />) : null}
-          {widgets.backendLessons.workspace === workspace ? dashboardWidget('backendLessons', <BackendLessonsWidget />) : null}
-          {widgets.backendApi.workspace === workspace ? dashboardWidget('backendApi', <BackendApiReferenceWidget />) : null}
           {activeApp === 'Terminal' && !terminalMinimized ? (
             <div
               className={`terminal-overlay ${terminalMaximized ? 'maximized terminal-large' : terminalSnap ? `snap-${terminalSnap} terminal-wide` : terminalSize.width > 860 || terminalSize.height > 520 ? 'terminal-wide' : ''}`}

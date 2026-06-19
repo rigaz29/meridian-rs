@@ -20,6 +20,7 @@ static MANAGER_TOOLS: &[&str] = &[
     "get_position_pnl",
     "get_my_positions",
     "get_wallet_balance",
+    "set_position_note",
 ];
 
 static SCREENER_TOOLS: &[&str] = &[
@@ -28,6 +29,7 @@ static SCREENER_TOOLS: &[&str] = &[
     "deploy_position",
     "get_active_bin",
     "get_top_candidates",
+    "get_pool_detail",
     "check_smart_wallets_on_pool",
     "study_top_lpers",
     "get_top_lpers",
@@ -60,6 +62,7 @@ static INTENT_MAP: &[IntentPattern] = &[
         tools: &[
             "deploy_position",
             "get_top_candidates",
+            "get_pool_detail",
             "get_active_bin",
             "get_pool_memory",
             "check_smart_wallets_on_pool",
@@ -106,7 +109,12 @@ static INTENT_MAP: &[IntentPattern] = &[
     },
     IntentPattern {
         intent: "positions",
-        tools: &["get_my_positions", "get_position_pnl", "get_wallet_balance"],
+        tools: &[
+            "get_my_positions",
+            "get_position_pnl",
+            "get_wallet_balance",
+            "set_position_note",
+        ],
         pattern: r"(?i)\b(position|portfolio|open|pnl|yield|range)\b",
     },
     IntentPattern {
@@ -130,6 +138,7 @@ static INTENT_MAP: &[IntentPattern] = &[
         intent: "screen",
         tools: &[
             "get_top_candidates",
+            "get_pool_detail",
             "study_top_lpers",
             "get_top_lpers",
             "get_token_holders",
@@ -146,6 +155,40 @@ static INTENT_MAP: &[IntentPattern] = &[
         intent: "memory",
         tools: &["get_pool_memory", "add_pool_note"],
         pattern: r"(?i)\b(memory|pool history|note|remember)\b",
+    },
+    IntentPattern {
+        intent: "lessons",
+        tools: &[
+            "add_lesson",
+            "list_lessons",
+            "pin_lesson",
+            "unpin_lesson",
+            "clear_lessons",
+            "get_performance_history",
+        ],
+        pattern: r"(?i)\b(lesson|lessons|learned|pin|takeaway)\b",
+    },
+    IntentPattern {
+        intent: "smartwallet",
+        tools: &[
+            "add_smart_wallet",
+            "list_smart_wallets",
+            "remove_smart_wallet",
+            "check_smart_wallets_on_pool",
+        ],
+        pattern: r"(?i)\b(smart wallet|kol|alpha wallet|track wallet|follow wallet)\b",
+    },
+    IntentPattern {
+        intent: "blocklist",
+        tools: &[
+            "blacklist_token",
+            "list_blacklist",
+            "remove_from_blacklist",
+            "block_deployer",
+            "list_blocked_deployers",
+            "unblock_dev",
+        ],
+        pattern: r"(?i)\b(blacklist|blocklist|block|ban|deployer|dev wallet)\b",
     },
 ];
 
@@ -171,12 +214,17 @@ fn get_general_tools(goal: &str) -> Vec<String> {
             "get_my_positions",
             "get_position_pnl",
             "get_top_candidates",
+            "get_pool_detail",
             "search_pools",
             "get_token_info",
             "get_token_holders",
             "get_token_narrative",
             "get_pool_memory",
             "check_smart_wallets_on_pool",
+            "list_lessons",
+            "list_smart_wallets",
+            "list_blacklist",
+            "list_blocked_deployers",
             "study_top_lpers",
             "get_top_lpers",
             "get_active_bin",

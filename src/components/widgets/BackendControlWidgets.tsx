@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Cpu, Settings2, ShieldCheck, TerminalSquare, WalletCards } from 'lucide-react';
+import { Cpu, TerminalSquare } from 'lucide-react';
 import { GlassCard } from '../ui/GlassCard';
 import { cachedJson } from '../../lib/clientCache';
 
@@ -13,16 +13,6 @@ const api = async <T,>(path: string, init?: RequestInit): Promise<ApiPayload<T>>
   if (!response.ok) return { success: false, error: payload?.error ?? response.statusText };
   return payload;
 };
-
-const compact = (value: unknown) => {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return value == null || value === '' ? '-' : String(value);
-  if (Math.abs(number) >= 1_000_000) return `${(number / 1_000_000).toFixed(2)}M`;
-  if (Math.abs(number) >= 1_000) return `${(number / 1_000).toFixed(2)}K`;
-  return Math.abs(number) >= 10 ? number.toFixed(2) : number.toFixed(4);
-};
-
-const short = (value?: string, size = 10) => value ? `${value.slice(0, size)}...${value.slice(-6)}` : '-';
 
 const Field = ({ label, value }: { label: string; value: unknown }) => (
   <div className="backend-kv">
@@ -100,159 +90,4 @@ export const BackendControlsWidget = () => {
   );
 };
 
-export const BackendConfigWidget = () => {
-  const [path, setPath] = useState('management.deployAmountSol');
-  const [value, setValue] = useState('0.1');
-  const [config, setConfig] = useState<any>();
-  const [result, setResult] = useState('');
 
-  const load = async () => {
-    const payload = await cachedJson<ApiPayload>('/api/meridian/config', 12_000).catch(() => undefined);
-    setConfig(payload?.data);
-  };
-
-  useEffect(() => { load(); }, []);
-
-  const patch = async () => {
-    let parsed: unknown = value;
-    try { parsed = JSON.parse(value); } catch {}
-    const payload = await api('/api/meridian/config', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path, value: parsed }) });
-    setResult(JSON.stringify(payload, null, 2));
-    await load();
-  };
-
-  return (
-    <GlassCard className="backend-card backend-config-card">
-      <div className="terminal-title"><Settings2 size={18} />CONFIG PATCH</div>
-      <div className="terminal-divider" />
-      <div className="backend-form-grid single">
-        <label>Path<input value={path} onChange={(event) => setPath(event.target.value)} /></label>
-        <label>Value<input value={value} onChange={(event) => setValue(event.target.value)} /></label>
-      </div>
-      <button className="backend-button" type="button" onClick={patch}>Save Patch</button>
-      <div className="backend-grid-two compact">
-        <Field label="Dry run" value={String(config?.dryRun ?? '-')} />
-        <Field label="Deploy amount" value={`${config?.management?.deployAmountSol ?? '-'} SOL`} />
-        <Field label="Max positions" value={config?.risk?.maxPositions ?? '-'} />
-        <Field label="Min TVL" value={compact(config?.screening?.minTvl)} />
-      </div>
-      <pre className="backend-result small">{result || 'No patch yet.'}</pre>
-    </GlassCard>
-  );
-};
-
-export const BackendWalletLogsWidget = () => {
-  const [wallet, setWallet] = useState('');
-  const [balance, setBalance] = useState('Wallet required.');
-  const [decisions, setDecisions] = useState<any[]>([]);
-
-  useEffect(() => {
-    let mounted = true;
-    const load = async () => {
-      const payload = await cachedJson<ApiPayload>('/api/meridian/decisions', 15_000).catch(() => undefined);
-      if (mounted) setDecisions(Array.isArray(payload?.data?.decisions) ? payload.data.decisions.slice(0, 8) : []);
-    };
-    load();
-    const timer = window.setInterval(load, 15_000);
-    return () => { mounted = false; window.clearInterval(timer); };
-  }, []);
-
-  const loadBalance = async () => {
-    const payload = await api(`/api/meridian/balance?wallet=${encodeURIComponent(wallet)}`);
-    setBalance(JSON.stringify(payload, null, 2));
-  };
-
-  return (
-    <GlassCard className="backend-card backend-wallet-card">
-      <div className="terminal-title"><WalletCards size={18} />WALLET & DECISIONS</div>
-      <div className="terminal-divider" />
-      <div className="backend-form-grid single">
-        <label>Wallet address<input value={wallet} onChange={(event) => setWallet(event.target.value)} placeholder="paste wallet address" /></label>
-      </div>
-      <button className="backend-button" type="button" onClick={loadBalance}>Load Balance</button>
-      <pre className="backend-result small">{balance}</pre>
-      <div className="backend-table">
-        <div className="backend-table-head"><span>Action</span><span>Status</span><span>Time</span></div>
-        {decisions.length ? decisions.map((decision, index) => (
-          <div className="backend-table-row" key={`${decision.timestamp}-${index}`}>
-            <span>{decision.tool ?? decision.action ?? 'decision'}</span>
-            <b className={decision.success === false ? 'bad' : 'ok'}>{decision.success === false ? 'failed' : 'ok'}</b>
-            <span>{short(decision.timestamp, 16)}</span>
-          </div>
-        )) : <div className="backend-empty">No decision-log entries yet.</div>}
-      </div>
-    </GlassCard>
-  );
-};
-
-export const BackendLessonsWidget = () => {
-  const [lessons, setLessons] = useState<any[]>([]);
-  const [performance, setPerformance] = useState<any>();
-  const [blacklist, setBlacklist] = useState<any>();
-
-  useEffect(() => {
-    let mounted = true;
-    const load = async () => {
-      const [lessonPayload, performancePayload, blacklistPayload] = await Promise.all([
-        cachedJson<ApiPayload>('/api/meridian/lessons', 30_000).catch(() => undefined),
-        cachedJson<ApiPayload>('/api/meridian/performance', 30_000).catch(() => undefined),
-        cachedJson<ApiPayload>('/api/meridian/blacklist', 30_000).catch(() => undefined),
-      ]);
-      if (!mounted) return;
-      setLessons(Array.isArray(lessonPayload?.data?.lessons) ? lessonPayload.data.lessons.slice(0, 5) : []);
-      setPerformance(performancePayload?.data?.history);
-      setBlacklist(blacklistPayload?.data);
-    };
-    load();
-    const timer = window.setInterval(load, 30_000);
-    return () => { mounted = false; window.clearInterval(timer); };
-  }, []);
-
-  return (
-    <GlassCard className="backend-card backend-lessons-card">
-      <div className="terminal-title"><ShieldCheck size={18} />LESSONS / PERFORMANCE / BLACKLIST</div>
-      <div className="terminal-divider" />
-      <div className="backend-grid-two compact">
-        <Field label="24h records" value={performance?.count ?? 0} />
-        <Field label="Total PnL" value={performance?.total_pnl_sol ?? 0} />
-        <Field label="Win rate" value={performance?.win_rate_pct ?? '-'} />
-        <Field label="Blocks" value={`${blacklist?.tokens?.blacklist?.length ?? 0} tokens / ${blacklist?.blocked_devs?.blocked_devs?.length ?? 0} devs`} />
-      </div>
-      <div className="backend-table lessons">
-        {lessons.length ? lessons.map((lesson, index) => (
-          <div className="backend-table-row" key={index}>
-            <span>{lesson.role ?? 'lesson'}</span>
-            <b>{Number(lesson.confidence ?? 0).toFixed(2)}</b>
-            <span>{lesson.content ?? lesson.text ?? '-'}</span>
-          </div>
-        )) : <div className="backend-empty">No lessons recorded yet.</div>}
-      </div>
-    </GlassCard>
-  );
-};
-
-export const BackendApiReferenceWidget = () => (
-  <GlassCard className="backend-card backend-api-card">
-    <div className="terminal-title"><TerminalSquare size={18} />BACKEND API MAP</div>
-    <div className="terminal-divider" />
-    <p className="backend-note">Frontend dashboard now owns the control UI. Rust backend on port 3001 is treated as API service through the Next proxy.</p>
-    <div className="backend-table api-map">
-      {[
-        ['/api/meridian/status', 'Runtime, dry-run mode, schedule, state path'],
-        ['/api/meridian/positions', 'Tracked DLMM positions and simulated dry-run PnL'],
-        ['/api/meridian/candidates', 'Screened pools and deploy candidates'],
-        ['/api/meridian/control', 'Screen/manage/manual actions'],
-        ['/api/meridian/config', 'Config summary and safe patch endpoint'],
-        ['/api/meridian/decisions', 'Recent executor decisions'],
-        ['/api/meridian/lessons', 'Learning records'],
-        ['/api/meridian/performance', 'Performance history'],
-        ['/api/meridian/blacklist', 'Token and developer blocks'],
-      ].map(([path, description]) => (
-        <div className="backend-table-row" key={path}>
-          <span>{path}</span>
-          <span>{description}</span>
-        </div>
-      ))}
-    </div>
-  </GlassCard>
-);

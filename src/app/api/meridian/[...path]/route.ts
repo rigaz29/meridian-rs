@@ -26,11 +26,13 @@ const proxy = async (request: NextRequest, context: RouteContext) => {
       headers: { 'content-type': response.headers.get('content-type') ?? 'application/json' },
     });
   } catch (error) {
+    // Log the real cause server-side only. Never expose the backend origin or
+    // raw fetch error (which can embed the internal URL) to the client.
+    console.error(`[meridian proxy] ${path.join('/')} failed:`, error);
     return NextResponse.json({
       success: false,
       command: path.join('/'),
-      error: error instanceof Error ? error.message : 'Meridian backend unavailable',
-      backendUrl: backendUrl.origin,
+      error: 'Meridian backend unavailable',
     }, { status: 502 });
   }
 };

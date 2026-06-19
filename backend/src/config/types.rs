@@ -21,6 +21,10 @@ pub struct Config {
     #[serde(default)]
     pub jupiter: JupiterConfig,
     #[serde(default)]
+    pub gmgn: GmgnConfig,
+    #[serde(default)]
+    pub hive_mind: HiveMindConfig,
+    #[serde(default)]
     pub indicators: IndicatorsConfig,
     #[serde(default)]
     pub darwin: DarwinConfig,
@@ -346,6 +350,75 @@ fn default_referral_fee_bps() -> u32 {
     50
 }
 
+/// GMGN OpenAPI fee source. Used as the primary `minTokenFeesSol` gate signal,
+/// falling back to pool/Jupiter fees when no API key is configured.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GmgnConfig {
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default = "default_gmgn_base_url")]
+    pub base_url: String,
+    #[serde(default = "default_gmgn_request_delay_ms")]
+    pub request_delay_ms: u64,
+    #[serde(default = "default_gmgn_max_retries")]
+    pub max_retries: u32,
+}
+
+impl Default for GmgnConfig {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            base_url: default_gmgn_base_url(),
+            request_delay_ms: default_gmgn_request_delay_ms(),
+            max_retries: default_gmgn_max_retries(),
+        }
+    }
+}
+
+fn default_gmgn_base_url() -> String {
+    "https://openapi.gmgn.ai".to_string()
+}
+
+fn default_gmgn_request_delay_ms() -> u64 {
+    2500
+}
+
+fn default_gmgn_max_retries() -> u32 {
+    2
+}
+
+/// HiveMind shared-learning sync (Agent Meridian). Pulls shared lessons/presets
+/// and pushes closed-position performance events. Enabled only when both `url`
+/// and `api_key` are set; private keys and wallet balances are never sent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HiveMindConfig {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default = "default_hive_pull_mode")]
+    pub pull_mode: String,
+}
+
+impl Default for HiveMindConfig {
+    fn default() -> Self {
+        Self {
+            url: None,
+            api_key: None,
+            agent_id: None,
+            pull_mode: default_hive_pull_mode(),
+        }
+    }
+}
+
+fn default_hive_pull_mode() -> String {
+    "auto".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndicatorsConfig {
@@ -555,6 +628,8 @@ impl Default for Config {
             tokens: TokensConfig::default(),
             api: ApiConfig::default(),
             jupiter: JupiterConfig::default(),
+            gmgn: GmgnConfig::default(),
+            hive_mind: HiveMindConfig::default(),
             indicators: IndicatorsConfig::default(),
             darwin: DarwinConfig::default(),
         }

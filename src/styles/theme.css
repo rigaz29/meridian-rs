@@ -251,6 +251,29 @@ body {
 .terminal-large .color-strip em { width: clamp(28px, 2vw, 42px); height: 18px; }
 .terminal-large .terminal-prompt { width: auto; margin: 26px 0 0; padding-top: 0; font-size: clamp(14px, .9vw, 18px); transform: none; }
 .terminal-large .terminal-prompt span { min-width: 34px; }
+/* Interactive terminal console: neofetch stays full size at the top, the prompt
+   flows inline right beneath it, and the whole body scrolls like a real shell. */
+.mini-terminal-body { overflow-y: auto; }
+.mini-terminal-body::-webkit-scrollbar { width: 8px; }
+.mini-terminal-body::-webkit-scrollbar-thumb { background: rgba(151, 169, 205, 0.28); border-radius: 8px; }
+.mini-terminal-body > .neofetch { flex: 0 0 auto; }
+.terminal-console { flex: 0 0 auto; margin-top: 14px; display: flex; flex-direction: column; gap: 8px; cursor: text; }
+.terminal-log { display: flex; flex-direction: column; gap: 4px; }
+.terminal-line { margin: 0; font-family: var(--font-mono); font-size: 12px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+.terminal-line.cmd { display: flex; align-items: baseline; gap: 8px; color: #d7d7d7; }
+.terminal-line.cmd b { color: #65d1ff; font-weight: 800; }
+.terminal-line.cmd span { min-width: 22px; padding: 1px 6px; border-radius: 3px; background: #3f3f3f; color: #fff; text-align: center; }
+.terminal-line.cmd code { color: #e8edf7; }
+.terminal-line.out { color: #b9c4d8; }
+.terminal-line.err { color: #fb7185; }
+.terminal-line.info { color: #8aa0c0; }
+.terminal-input-row { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding-top: 8px; border-top: 1px dashed rgba(168, 181, 211, 0.3); }
+.terminal-input-row b { color: #65d1ff; font-weight: 800; }
+.terminal-input-row span { min-width: 22px; padding: 1px 6px; border-radius: 3px; background: #3f3f3f; color: #fff; text-align: center; font-size: 12px; }
+.terminal-input { flex: 1; min-width: 0; background: transparent; border: 0; outline: 0; color: #fff; font-family: var(--font-mono); font-size: 12px; caret-color: #65d1ff; }
+.terminal-input::placeholder { color: #5c6b85; }
+.terminal-wide .terminal-line, .terminal-wide .terminal-input { font-size: clamp(12px, .85vw, 15px); }
+.terminal-large .terminal-line, .terminal-large .terminal-input { font-size: clamp(13px, .9vw, 16px); }
 .resize-handle { position: absolute; z-index: 40; }
 .resize-handle.n { left: 8px; right: 8px; top: -4px; height: 8px; cursor: ns-resize; }
 .resize-handle.s { left: 8px; right: 8px; bottom: -4px; height: 8px; cursor: ns-resize; }

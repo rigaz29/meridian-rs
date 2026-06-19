@@ -11,6 +11,7 @@ mod config;
 mod cycle;
 #[cfg(test)]
 mod docs_quality;
+mod hivemind;
 mod lessons;
 mod llm;
 mod models;
@@ -236,6 +237,29 @@ async fn main() -> Result<()> {
             }
         }
     });
+
+    // ── HiveMind shared-learning sync ──────────────────────────
+    if hivemind::is_enabled(&config.hive_mind) {
+        hivemind::bootstrap(&config.hive_mind).await;
+
+        let hive_config = config.hive_mind.clone();
+        let hive_interval = tokio::time::Duration::from_secs(hivemind::heartbeat_interval_secs());
+        let mut shutdown_hive = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(hive_interval);
+            interval.tick().await; // skip first tick (bootstrap already ran)
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = shutdown_hive.changed() => {
+                        info("hivemind", "Shutdown signal received, stopping HiveMind sync");
+                        break;
+                    }
+                }
+                hivemind::heartbeat_tick(&hive_config).await;
+            }
+        });
+    }
 
     info("main", "Starting cycle scheduler...");
 

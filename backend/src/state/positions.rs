@@ -1182,7 +1182,10 @@ mod tests {
 
         state.sync_open_positions(vec![]);
 
-        let position = state.positions.get("test-pos-1").expect("position remains tracked");
+        let position = state
+            .positions
+            .get("test-pos-1")
+            .expect("position remains tracked");
         assert_eq!(position.status, PositionStatus::Closed);
         assert!(state
             .recent_events

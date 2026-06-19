@@ -239,6 +239,10 @@ fn load_learning_context(role: &AgentRole, config: &Config) -> String {
         }
     }
 
+    if let Some(hive) = crate::hivemind::shared_lessons_for_prompt(&role_key, 6) {
+        sections.push(hive);
+    }
+
     sections.join("\n\n")
 }
 
