@@ -104,6 +104,47 @@ async fn run_repl_command(
     }
 }
 
+/// Drop tracked positions that no longer exist on-chain. Runs once at startup
+/// before any cycle can act, so the agent never tries to manage or close a
+/// phantom (failed deploy, leaked dry-run id, or externally-closed) position.
+async fn reconcile_positions_on_chain(
+    positions: &mut PositionState,
+    config: &config::Config,
+    state_path: &str,
+) {
+    let active_ids: Vec<String> = positions.get_active().iter().map(|p| p.id.clone()).collect();
+    if active_ids.is_empty() {
+        return;
+    }
+    match tools::meteora_native::existing_positions(config, &active_ids).await {
+        Ok(existing) => {
+            let mut pruned = 0;
+            for id in &active_ids {
+                if !existing.contains(id) && positions.mark_orphaned(id) {
+                    pruned += 1;
+                    warn(
+                        "reconcile",
+                        &format!(
+                            "Pruned phantom position {} (not found on-chain)",
+                            &id[..8.min(id.len())]
+                        ),
+                    );
+                }
+            }
+            if pruned > 0 {
+                match positions.save(state_path) {
+                    Ok(()) => info(
+                        "reconcile",
+                        &format!("Reconciled state with chain — pruned {pruned} phantom position(s)"),
+                    ),
+                    Err(e) => warn("reconcile", &format!("Failed to persist pruned state: {e}")),
+                }
+            }
+        }
+        Err(e) => warn("reconcile", &format!("On-chain reconcile skipped: {e}")),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -199,7 +240,11 @@ async fn main() -> Result<()> {
         }
     }
 
-    let positions = PositionState::load(&state_path)?;
+    let mut positions = PositionState::load(&state_path)?;
+    // Reconcile tracked state against the chain before anything manages it, so a
+    // phantom position (failed/un-landed deploy, leaked dry-run id, or a close
+    // done outside the agent) can never be selected for management or close.
+    reconcile_positions_on_chain(&mut positions, &config, &state_path).await;
     PoolMemoryStore::load(&pool_memory_path)?;
     info(
         "main",

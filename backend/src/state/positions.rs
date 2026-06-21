@@ -355,6 +355,29 @@ impl PositionState {
         }
     }
 
+    /// Mark a tracked position as orphaned: it no longer exists on-chain
+    /// (a phantom from a failed/un-landed deploy, or closed outside the agent).
+    /// Moves it to `Closed` so it leaves active management while keeping the
+    /// record for history. Returns true if a matching active position was found.
+    pub fn mark_orphaned(&mut self, id: &str) -> bool {
+        let Some(p) = self.positions.get_mut(id) else {
+            return false;
+        };
+        if p.status == PositionStatus::Closed {
+            return false;
+        }
+        p.status = PositionStatus::Closed;
+        let pool_display = p
+            .pool_name
+            .clone()
+            .unwrap_or_else(|| p.pool_address.clone());
+        let details = format!("Pruned {} — position not found on-chain", pool_display);
+        let id_owned = id.to_string();
+        self.push_event(EventType::Close, &id_owned, &details);
+        self.last_updated = Some(Utc::now().to_rfc3339());
+        true
+    }
+
     // ── Instructions ─────────────────────────────────────────────
 
     /// Sanitize text for safe storage: strip HTML tags, newlines, limit length.
@@ -1084,6 +1107,24 @@ mod tests {
         let pos = state.positions.get("test-pos-1").unwrap();
         assert_eq!(pos.status, PositionStatus::Closed);
         assert_eq!(pos.pnl_sol, Some(0.1));
+    }
+
+    #[test]
+    fn test_mark_orphaned_closes_and_leaves_active_set() {
+        let mut state = PositionState::default();
+        state.add(test_position());
+        assert_eq!(state.count_active(), 1);
+
+        // First prune moves it out of active management.
+        assert!(state.mark_orphaned("test-pos-1"));
+        let pos = state.positions.get("test-pos-1").unwrap();
+        assert_eq!(pos.status, PositionStatus::Closed);
+        assert_eq!(state.count_active(), 0);
+
+        // Idempotent: re-pruning an already-closed position is a no-op.
+        assert!(!state.mark_orphaned("test-pos-1"));
+        // Unknown id is a no-op too.
+        assert!(!state.mark_orphaned("nonexistent"));
     }
 
     #[test]

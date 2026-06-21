@@ -489,6 +489,40 @@ pub async fn wallet_token_ui_balance(config: &Config, mint: &str) -> Result<f64>
     Ok(total)
 }
 
+/// Return the subset of the given position ids whose accounts currently exist
+/// on-chain (non-zero lamports). Ids that are not valid pubkeys (e.g. leaked
+/// dry-run placeholders) are treated as non-existent. Used to prune phantom or
+/// externally-closed positions from tracked state so the agent never tries to
+/// manage or close an account that isn't there.
+pub async fn existing_positions(
+    config: &Config,
+    ids: &[String],
+) -> Result<std::collections::HashSet<String>> {
+    let mut existing = std::collections::HashSet::new();
+    if ids.is_empty() {
+        return Ok(existing);
+    }
+    let rpc = RpcClient::new(resolve_rpc_url(config));
+    let parsed: Vec<(String, Pubkey)> = ids
+        .iter()
+        .filter_map(|id| Pubkey::from_str(id).ok().map(|pk| (id.clone(), pk)))
+        .collect();
+    // get_multiple_accounts caps at 100 keys per request.
+    for chunk in parsed.chunks(100) {
+        let pubkeys: Vec<Pubkey> = chunk.iter().map(|(_, pk)| *pk).collect();
+        let accounts = rpc
+            .get_multiple_accounts(&pubkeys)
+            .await
+            .map_err(|e| anyhow!("get_multiple_accounts for position reconcile: {}", e))?;
+        for ((id, _), account) in chunk.iter().zip(accounts.into_iter()) {
+            if account.map(|a| a.lamports > 0).unwrap_or(false) {
+                existing.insert(id.clone());
+            }
+        }
+    }
+    Ok(existing)
+}
+
 pub async fn close_position(
     position_address: &str,
     config: &Config,
