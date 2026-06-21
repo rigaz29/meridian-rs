@@ -129,6 +129,14 @@ pub fn wallet_secret_from_env() -> Result<String> {
         .ok_or_else(|| anyhow!("WALLET_PRIVATE_KEY or MERIDIAN_WALLET_PRIVATE_KEY is required for native Meteora transactions"))
 }
 
+/// Derive the wallet's public address from the signing keypair in the
+/// environment. Lets the runtime resolve its own address (e.g. for balance
+/// reads) when MERIDIAN_WALLET isn't set explicitly — the keypair is the
+/// authoritative source of the address anyway.
+pub fn wallet_pubkey_from_env() -> Result<String> {
+    keypair_pubkey_from_secret(&wallet_secret_from_env()?)
+}
+
 pub fn resolve_rpc_url(config: &Config) -> String {
     config
         .api

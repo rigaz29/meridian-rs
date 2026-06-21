@@ -254,8 +254,25 @@ async fn main() -> Result<()> {
         ),
     );
 
-    // Read wallet address from env or config
-    let wallet_address = std::env::var("MERIDIAN_WALLET").unwrap_or_else(|_| "".to_string());
+    // Wallet address for balance reads: prefer MERIDIAN_WALLET, else derive it
+    // from the signing keypair so the runtime can read its own balance (and thus
+    // screen → deploy) even when MERIDIAN_WALLET isn't set. Without this the
+    // balance read returns 0 and every screening cycle bails with "not enough
+    // SOL" despite a funded wallet.
+    let wallet_address = std::env::var("MERIDIAN_WALLET")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| match tools::meteora_native::wallet_pubkey_from_env() {
+            Ok(pubkey) => {
+                info("main", &format!("Derived wallet address from keypair: {pubkey}"));
+                Some(pubkey)
+            }
+            Err(e) => {
+                warn("main", &format!("Could not derive wallet address: {e}"));
+                None
+            }
+        })
+        .unwrap_or_default();
 
     // ── Graceful shutdown channel ──────────────────────────────
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
