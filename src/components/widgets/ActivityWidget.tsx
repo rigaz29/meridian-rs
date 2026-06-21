@@ -119,7 +119,14 @@ const humanMessage = (decision: Decision): string => {
   if (tool.includes('screen')) {
     return decision.reason || (data.note as string) || 'Screening cycle';
   }
-  return decision.reason || decision.message || (name ? `${tool || 'action'} · ${name}` : (tool || 'Backend action'));
+  if (decision.reason) return decision.reason;
+  if (decision.message) return decision.message;
+  // Default: prettify the tool name (get_token_narrative -> "Read token narrative").
+  if (!tool) return 'Backend action';
+  const readVerb = /^(get|list|fetch|read)_/.test(tool);
+  const label = tool.replace(/^(get|list|fetch|read)_/, '').replace(/_/g, ' ');
+  const text = readVerb ? `Read ${label}` : label;
+  return name ? `${text} · ${name}` : text;
 };
 
 const mapDecision = (decision: Decision): LogEntry => {
