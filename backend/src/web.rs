@@ -649,6 +649,14 @@ async fn enrich_position_state(payload: &mut Value, config: &Config) {
             _ => None,
         };
 
+        // ── Base-token icon (same IPFS image Meteora shows) ──
+        let base_icon = match &base_mint {
+            Some(mint) if mint != crate::tools::wallet::SOL_MINT => {
+                crate::tools::dlmm::get_token_icon(mint).await
+            }
+            _ => None,
+        };
+
         let Some(obj) = position.as_object_mut() else {
             continue;
         };
@@ -690,6 +698,9 @@ async fn enrich_position_state(payload: &mut Value, config: &Config) {
             if let Some(value) = pnl.in_range {
                 obj.insert("in_range".to_string(), json!(value));
             }
+        }
+        if let Some(icon) = base_icon {
+            obj.insert("base_icon".to_string(), json!(icon));
         }
     }
 }

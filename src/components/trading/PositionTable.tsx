@@ -29,6 +29,7 @@ type BackendPosition = {
   price_active?: number;
   fee_apr_pct?: number;
   in_range?: boolean;
+  base_icon?: string | null;
   pnl_sol?: number | null;
   signal_snapshot?: {
     priceRange?: { min?: number; max?: number } | null;
@@ -66,6 +67,8 @@ type PositionRow = {
   age: string;
   markerPct: number | null;
   inRange: boolean;
+  baseIcon: string | null;
+  posId: string;
 };
 
 const fallbackPositions: PositionRow[] = [];
@@ -119,6 +122,30 @@ const formatSubPrice = (value: number) => {
 const formatPriceRange = (min?: number, max?: number) => {
   if (!Number.isFinite(min as number) || !Number.isFinite(max as number)) return null;
   return `${formatSubPrice(min as number)} - ${formatSubPrice(max as number)}`;
+};
+
+const SOL_ICON = 'https://raw.githubusercontent.com/solana-labs/token-list/main/assets/mainnet/So11111111111111111111111111111111111111112/logo.png';
+
+// DexScreener resolves a token image directly from its Solana mint.
+const tokenIconUrl = (mint?: string | null) =>
+  mint ? `https://dd.dexscreener.com/ds-data/tokens/solana/${mint}.png?size=lg` : null;
+
+// Token logo (Meteora style): a 16px round image that falls back to a colored
+// dot if the mint has no resolvable icon.
+const TokenLogo = ({ src, alt, fallback }: { src: string | null; alt: string; fallback: string }) => {
+  const [errored, setErrored] = useState(false);
+  if (!src || errored) return <i className={`mp-dot ${fallback}`} />;
+  return (
+    <img
+      src={src}
+      alt={alt}
+      width={16}
+      height={16}
+      loading="lazy"
+      onError={() => setErrored(true)}
+      style={{ width: 16, height: 16, borderRadius: '50%', objectFit: 'cover', flexShrink: 0 }}
+    />
+  );
 };
 
 const formatRange = (lower: number | undefined, upper: number | undefined, tokenUsd: number, solUsd: number) => {
@@ -211,6 +238,8 @@ const mapPosition = (position: BackendPosition, pricing: PricingContext): Positi
     age: formatAge(position.created_at),
     markerPct,
     inRange: position.in_range ?? true,
+    baseIcon: position.base_icon ?? tokenIconUrl(mint ?? position.base_mint),
+    posId: position.id ?? '',
   };
 };
 
@@ -267,6 +296,24 @@ export const PositionTable = () => {
     };
   }, []);
 
+  // Claim fees / close a position via the backend control endpoint. These
+  // execute REAL on-chain transactions, so confirm first.
+  const runAction = async (action: 'claim_fees' | 'close_position', positionId: string, label: string) => {
+    if (!positionId) return;
+    const verb = action === 'close_position' ? 'Close' : 'Claim fees on';
+    if (!window.confirm(`${verb} ${label}? This sends a real on-chain transaction.`)) return;
+    setPositions((prev) => prev.map((p) => (p.posId === positionId ? { ...p, status: 'PENDING' } : p)));
+    try {
+      await fetch('/api/meridian/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, args: { position_address: positionId, reason: 'manual dashboard action' } }),
+      });
+    } catch {
+      /* surfaced on next refresh */
+    }
+  };
+
   return (
     <GlassCard className="positions-card terminal-positions">
       <div className="card-title">
@@ -274,7 +321,7 @@ export const PositionTable = () => {
         <span>{positions.length} POSITIONS</span>
       </div>
       <div className="position-head">
-        <span>Price Range</span><span>Your Liquidity</span><span>Claimable Fees</span><span>PnL</span>
+        <span>Price Range</span><span>Your Liquidity</span><span>Claimable Fees</span><span>PnL</span><span style={{ textAlign: 'right' }}>Actions</span>
       </div>
       <div className="position-rows">
         {positions.length ? positions.map((position) => (
@@ -317,17 +364,35 @@ export const PositionTable = () => {
             </div>
             <div className="mp-stack">
               <div className="mp-main">{position.liquidityUsd}</div>
-              <div className="mp-token"><i className="mp-dot mp-sol" /><span>{position.liquidityPrimary}</span></div>
-              <div className="mp-token"><i className="mp-dot mp-pair" /><span>{position.liquiditySecondary}</span></div>
+              <div className="mp-token"><TokenLogo src={position.baseIcon} alt={position.pair} fallback="mp-pair" /><span>{position.liquiditySecondary}</span></div>
+              <div className="mp-token"><TokenLogo src={SOL_ICON} alt="SOL" fallback="mp-sol" /><span>{position.liquidityPrimary}</span></div>
             </div>
             <div className="mp-stack">
               <div className="mp-main mp-fees-main">{position.feesUsd}<em>{position.feesApr}</em></div>
-              <div className="mp-token"><i className="mp-dot mp-sol" /><span>{position.feesPrimary}</span></div>
-              <div className="mp-token"><i className="mp-dot mp-pair" /><span>{position.feesSecondary}</span></div>
+              <div className="mp-token"><TokenLogo src={position.baseIcon} alt={position.pair} fallback="mp-pair" /><span>{position.feesSecondary}</span></div>
+              <div className="mp-token"><TokenLogo src={SOL_ICON} alt="SOL" fallback="mp-sol" /><span>{position.feesPrimary}</span></div>
             </div>
             <div className={position.pnlPositive ? 'mp-pnl mp-up' : 'mp-pnl mp-down'}>
               <div>{position.pnlUsd}</div>
               <span>{position.pnlPct}</span>
+            </div>
+            <div className="mp-actions" style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-end', justifyContent: 'center' }}>
+              <button
+                type="button"
+                onClick={() => runAction('claim_fees', position.posId, position.pair)}
+                disabled={position.status === 'PENDING'}
+                style={{ fontSize: 12, fontWeight: 600, padding: '3px 12px', borderRadius: 6, border: 'none', cursor: 'pointer', background: '#2dd4bf', color: '#0b0b14' }}
+              >
+                Claim
+              </button>
+              <button
+                type="button"
+                onClick={() => runAction('close_position', position.posId, position.pair)}
+                disabled={position.status === 'PENDING'}
+                style={{ fontSize: 12, fontWeight: 600, padding: '3px 12px', borderRadius: 6, border: '1px solid rgba(177,169,211,0.25)', cursor: 'pointer', background: 'rgba(148,143,170,0.18)', color: '#d7d3e8' }}
+              >
+                {position.status === 'PENDING' ? '…' : 'Close'}
+              </button>
             </div>
           </div>
         )) : <div className="positions-empty">No active backend positions.</div>}

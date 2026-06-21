@@ -1538,6 +1538,34 @@ async fn get_pool_metadata(pool_address: &str) -> Option<PoolMetadata> {
     resp.json::<PoolMetadata>().await.ok()
 }
 
+/// Best-effort fetch of a token's icon URL (the same IPFS image Meteora shows),
+/// via the pool-discovery search API keyed by mint. Returns None on any miss.
+pub async fn get_token_icon(mint: &str) -> Option<String> {
+    let client = make_client();
+    let url = format!("{}/pools?query={}&limit=1", METEORA_POOL_DISCOVERY_API, mint);
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let value: serde_json::Value = resp.json().await.ok()?;
+    for pool in value.get("data")?.as_array()? {
+        for key in ["token_x", "token_y"] {
+            let token = match pool.get(key) {
+                Some(token) => token,
+                None => continue,
+            };
+            if token.get("address").and_then(|a| a.as_str()) == Some(mint) {
+                if let Some(icon) = token.get("icon").and_then(|i| i.as_str()) {
+                    if !icon.is_empty() {
+                        return Some(icon.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
