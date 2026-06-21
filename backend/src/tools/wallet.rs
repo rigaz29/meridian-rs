@@ -491,7 +491,7 @@ pub async fn get_sol_price() -> Result<f64> {
 /// Resolve an SPL mint's on-chain decimals via `getTokenSupply`. Returns 9 for
 /// native SOL without a round-trip. Used to size swap input amounts correctly —
 /// guessing the wrong decimals produces an order for the wrong quantity.
-async fn resolve_mint_decimals(
+pub async fn resolve_mint_decimals(
     client: &reqwest::Client,
     config: &Config,
     mint: &str,

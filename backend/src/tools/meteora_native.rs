@@ -380,6 +380,32 @@ pub async fn claim_fees(position_address: &str, config: &Config) -> Result<Nativ
     })
 }
 
+/// Read-only on-chain quote of a position's currently claimable (pending) fees,
+/// returned as `(base_token_x_raw, sol_y_lamports)`. Runs the same fetch + plan
+/// math as a claim but never builds or sends a transaction, so it's safe to call
+/// repeatedly (e.g. to populate the dashboard). token_y on a SOL-quoted pool is
+/// SOL (9 decimals); token_x is the base token in its own decimals.
+pub async fn quote_claimable_fees(position_address: &str, config: &Config) -> Result<(u64, u64)> {
+    use wp_solana_meteora_dlmm_core::plan::claim_fee::plan_claim_fee;
+    use wp_solana_meteora_dlmm_sdk::fetch::claim_fee::fetch_claim_fee_snapshot;
+
+    let keypair = keypair_from_secret(&wallet_secret_from_env()?)?;
+    let position = parse_pubkey("DLMM position address", position_address)?;
+    let rpc_client = RpcClient::new(resolve_rpc_url(config));
+    let rpc_ctx = RpcContext::confirmed(Arc::new(rpc_client));
+    let params = ClaimFeeParams {
+        position_address: position,
+        authority: keypair.pubkey(),
+    };
+    let snapshot = fetch_claim_fee_snapshot(&rpc_ctx.client, &params)
+        .await
+        .map_err(|e| anyhow!("fetch claim-fee snapshot: {}", e))?;
+    let plan_config = WorkspacePlanConfig::default();
+    let plan = plan_claim_fee(&snapshot, params, &plan_config)
+        .map_err(|e| anyhow!("plan claim fee quote: {}", e))?;
+    Ok((plan.quote.claimable_fee_x, plan.quote.claimable_fee_y))
+}
+
 /// SPL Token program id.
 const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 /// Native mint (wrapped SOL).

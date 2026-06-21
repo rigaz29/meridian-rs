@@ -17,6 +17,8 @@ type BackendPosition = {
   status?: string;
   created_at?: string;
   total_fees_claimed?: number;
+  claimable_fee_sol?: number;
+  claimable_fee_token?: number;
   pnl_sol?: number | null;
   signal_snapshot?: {
     priceRange?: { min?: number; max?: number } | null;
@@ -109,21 +111,23 @@ const resolveMint = (position: BackendPosition, mintByPool: Record<string, strin
 
 const mapPosition = (position: BackendPosition, pricing: PricingContext): PositionRow => {
   const amountSol = Number(position.amount_sol ?? 0);
-  const feesSol = Number(position.total_fees_claimed ?? 0);
   const pnlSol = Number(position.pnl_sol ?? 0);
   const solUsd = pricing.solUsd;
   const mint = resolveMint(position, pricing.mintByPool);
   const tokenUsd = mint ? Number(pricing.tokenPrices[mint] ?? 0) : 0;
   const liquidityUsd = amountSol * solUsd;
-  const feesUsd = feesSol * solUsd;
   const pnlUsd = pnlSol * solUsd;
   const pnlPct = liquidityUsd > 0 ? (pnlUsd / liquidityUsd) * 100 : 0;
   const solLeg = amountSol / 2;
   const tokenLegUsd = Math.max(0, liquidityUsd - (solLeg * solUsd));
   const tokenLeg = tokenUsd > 0 ? tokenLegUsd / tokenUsd : 0;
-  const feeSolLeg = feesSol / 2;
-  const feeTokenUsd = Math.max(0, feesUsd - (feeSolLeg * solUsd));
-  const feeTokenLeg = tokenUsd > 0 ? feeTokenUsd / tokenUsd : 0;
+  // Live claimable (pending) fees from the backend's on-chain quote — the SOL
+  // leg and base-token leg are reported separately, not split from a total.
+  const feeSolLeg = Number(position.claimable_fee_sol ?? 0);
+  const feeTokenLeg = Number(position.claimable_fee_token ?? 0);
+  const feeSolUsd = feeSolLeg * solUsd;
+  const feeTokenUsd = feeTokenLeg * tokenUsd;
+  const feesUsd = feeSolUsd + feeTokenUsd;
   const symbol = position.base_symbol ?? position.pool_name ?? 'TOKEN';
 
   return {
@@ -137,11 +141,11 @@ const mapPosition = (position: BackendPosition, pricing: PricingContext): Positi
       ? `${formatTokenAmount(tokenLeg)} ${symbol} (${formatUsd(tokenLegUsd)})`
       : `${symbol} price unavailable`,
     feesUsd: formatUsd(feesUsd),
-    feesPrimary: `${feeSolLeg.toFixed(6)} SOL (${formatUsd(feeSolLeg * solUsd)})`,
+    feesPrimary: `${feeSolLeg.toFixed(6)} SOL (${formatUsd(feeSolUsd)})`,
     feesSecondary: tokenUsd > 0
       ? `${formatTokenAmount(feeTokenLeg)} ${symbol} (${formatUsd(feeTokenUsd)})`
-      : `${symbol} price unavailable`,
-    feesApr: `${Math.min(99.99, Math.max(0.01, Math.abs(feesSol) * 52000)).toFixed(2)}%`,
+      : `${formatTokenAmount(feeTokenLeg)} ${symbol}`,
+    feesApr: `${Math.min(99.99, Math.max(0, liquidityUsd > 0 ? (feesUsd / liquidityUsd) * 100 : 0)).toFixed(2)}%`,
     pnlUsd: `${pnlUsd >= 0 ? '+' : '-'}${formatUsd(pnlUsd)}`,
     pnlPct: `${pnlPct >= 0 ? '+' : '-'}${Math.abs(pnlPct).toFixed(2)}%`,
     pnlPositive: pnlUsd >= 0,

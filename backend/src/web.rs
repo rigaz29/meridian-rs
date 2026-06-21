@@ -578,13 +578,66 @@ async fn status(State(state): State<WebAppState>) -> Json<Value> {
 }
 
 async fn get_positions(State(state): State<WebAppState>) -> Json<Value> {
-    let simulate_dry_run = load_web_config(&state)
-        .map(|config| config.dry_run)
-        .unwrap_or(false);
-    Json(json_ok(
-        "positions",
-        positions_payload(&state.state_path, simulate_dry_run),
-    ))
+    let config = load_web_config(&state).ok();
+    let simulate_dry_run = config.as_ref().map(|config| config.dry_run).unwrap_or(false);
+    let payload = positions_payload(&state.state_path, simulate_dry_run);
+    // For live (non-dry-run) state, enrich open positions with their current
+    // on-chain claimable (pending) fees so the dashboard reflects real fees,
+    // not just the historical claimed total.
+    let payload = match (payload, config) {
+        (Ok(mut value), Some(config)) if !config.dry_run => {
+            enrich_claimable_fees(&mut value, &config).await;
+            Ok(value)
+        }
+        (payload, _) => payload,
+    };
+    Json(json_ok("positions", payload))
+}
+
+/// Add `claimable_fee_sol` / `claimable_fee_token` to each open position by
+/// quoting its pending fees on-chain (read-only). Best-effort: any position that
+/// fails to quote is left as 0 so one bad position never breaks the endpoint.
+async fn enrich_claimable_fees(payload: &mut Value, config: &Config) {
+    let Some(positions) = payload.get_mut("positions").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let http = reqwest::Client::new();
+    for position in positions.iter_mut() {
+        let status = position
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("active")
+            .to_lowercase();
+        if status == "closed" {
+            continue;
+        }
+        let Some(id) = position.get("id").and_then(Value::as_str).map(str::to_string) else {
+            continue;
+        };
+        let (fee_x_raw, fee_y_lamports) =
+            crate::tools::meteora_native::quote_claimable_fees(&id, config)
+                .await
+                .unwrap_or_default();
+        let sol = fee_y_lamports as f64 / 1_000_000_000.0;
+        let base_mint = position
+            .get("base_mint")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let token = if fee_x_raw == 0 {
+            0.0
+        } else if let Some(mint) = base_mint {
+            match crate::tools::wallet::resolve_mint_decimals(&http, config, &mint).await {
+                Ok(decimals) => fee_x_raw as f64 / 10f64.powi(decimals as i32),
+                Err(_) => 0.0,
+            }
+        } else {
+            0.0
+        };
+        if let Some(obj) = position.as_object_mut() {
+            obj.insert("claimable_fee_sol".to_string(), json!(sol));
+            obj.insert("claimable_fee_token".to_string(), json!(token));
+        }
+    }
 }
 
 async fn get_balance(
