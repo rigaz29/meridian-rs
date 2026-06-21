@@ -1538,6 +1538,62 @@ async fn get_pool_metadata(pool_address: &str) -> Option<PoolMetadata> {
     resp.json::<PoolMetadata>().await.ok()
 }
 
+/// Aggregated closed-position history for one pool (for the portfolio view).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolHistory {
+    pub pool: String,
+    pub pool_name: String,
+    pub pnl_usd: f64,
+    pub deposit_usd: f64,
+    pub withdraw_usd: f64,
+    pub fees_usd: f64,
+    pub closed_count: usize,
+    pub win_count: usize,
+}
+
+/// Fetch and aggregate a wallet's CLOSED positions for one pool from the Meteora
+/// PnL API. Returns None if the pool has no closed positions for the wallet.
+pub async fn get_pool_history(pool: &str, pool_name: &str, wallet: &str) -> Option<PoolHistory> {
+    let client = make_client();
+    let url = format!(
+        "{}/positions/{}/pnl?user={}&status=closed&pageSize=100&page=1",
+        METEORA_DLMM_API, pool, wallet,
+    );
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let data: PnlPoolResponse = resp.json().await.ok()?;
+    let positions = data.positions.unwrap_or_default();
+    if positions.is_empty() {
+        return None;
+    }
+    let total_usd = |a: &Option<AllTimeAmounts>| {
+        a.as_ref()
+            .and_then(|x| x.total.as_ref())
+            .and_then(|t| t.usd)
+            .unwrap_or(0.0)
+    };
+    let mut history = PoolHistory {
+        pool: pool.to_string(),
+        pool_name: pool_name.to_string(),
+        ..Default::default()
+    };
+    for pos in &positions {
+        let pnl = pos.pnl_usd.unwrap_or(0.0);
+        history.pnl_usd += pnl;
+        history.deposit_usd += total_usd(&pos.all_time_deposits);
+        history.withdraw_usd += total_usd(&pos.all_time_withdrawals);
+        history.fees_usd += total_usd(&pos.all_time_fees);
+        history.closed_count += 1;
+        if pnl > 0.0 {
+            history.win_count += 1;
+        }
+    }
+    Some(history)
+}
+
 /// Best-effort fetch of a pool's display name (e.g. "drooling-SOL").
 pub async fn get_pool_name(pool_address: &str) -> Option<String> {
     get_pool_metadata(pool_address)

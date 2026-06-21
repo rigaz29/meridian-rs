@@ -5,7 +5,7 @@ import { Sidebar } from './Sidebar';
 import { Topbar } from './Topbar';
 import { Dock } from './Dock';
 import { PositionTable } from '../trading/PositionTable';
-import { RecentTrades } from '../trading/RecentTrades';
+import { PortfolioWidget } from '../trading/PortfolioWidget';
 import { WeatherWidget } from '../widgets/WeatherWidget';
 import { MusicWidget } from '../widgets/MusicWidget';
 import { ActivityWidget } from '../widgets/ActivityWidget';
@@ -503,7 +503,7 @@ export default function DashboardLayout() {
         <div className="dashboard-grid">
           {widgets.profile.workspace === workspace ? dashboardWidget('profile', <Sidebar />) : null}
           {widgets.positions.workspace === workspace ? dashboardWidget('positions', <PositionTable />) : null}
-          {widgets.trades.workspace === workspace ? dashboardWidget('trades', <RecentTrades />) : null}
+          {widgets.trades.workspace === workspace ? dashboardWidget('trades', <PortfolioWidget />) : null}
           {widgets.weather.workspace === workspace ? dashboardWidget('weather', <WeatherWidget />) : null}
           {widgets.music.workspace === workspace ? dashboardWidget('music', <MusicWidget />) : null}
           {widgets.candidates.workspace === workspace ? dashboardWidget('candidates', <CandidateWidget />) : null}

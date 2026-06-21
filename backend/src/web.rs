@@ -71,6 +71,7 @@ pub fn build_router(state: WebAppState) -> Router {
         .route("/api/control", post(post_control))
         .route("/api/lessons", get(get_lessons))
         .route("/api/performance", get(get_performance))
+        .route("/api/portfolio", get(get_portfolio))
         .route("/api/blacklist", get(get_blacklist))
         .with_state(state)
     // No CORS layer: this backend is reached only server-side by the Next.js
@@ -795,6 +796,76 @@ async fn get_performance(State(state): State<WebAppState>) -> Json<Value> {
     Json(json_ok(
         "performance",
         performance_payload(&state.state_path),
+    ))
+}
+
+/// Portfolio / historical view: aggregate the wallet's CLOSED positions per pool
+/// (PnL, deposit, withdraw, fees) from the Meteora PnL API, plus summary stats.
+async fn get_portfolio(State(state): State<WebAppState>) -> Json<Value> {
+    let wallet = crate::tools::meteora_native::wallet_pubkey_from_env().unwrap_or_default();
+    let positions = match PositionState::load(&state.state_path) {
+        Ok(p) => p,
+        Err(e) => return Json(json_error("portfolio", e)),
+    };
+    // Unique pools the wallet has ever held a position in.
+    let mut pools: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for p in positions.get_all() {
+        if !p.pool_address.is_empty() {
+            pools
+                .entry(p.pool_address.clone())
+                .or_insert_with(|| p.pool_name.clone().unwrap_or_default());
+        }
+    }
+
+    let mut histories = Vec::new();
+    if !wallet.is_empty() {
+        for (pool, name) in &pools {
+            if let Some(h) = crate::tools::dlmm::get_pool_history(pool, name, &wallet).await {
+                histories.push(h);
+            }
+        }
+    }
+    histories.sort_by(|a, b| {
+        b.pnl_usd
+            .partial_cmp(&a.pnl_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let total_pnl: f64 = histories.iter().map(|h| h.pnl_usd).sum();
+    let total_deposit: f64 = histories.iter().map(|h| h.deposit_usd).sum();
+    let total_fees: f64 = histories.iter().map(|h| h.fees_usd).sum();
+    let closed_count: usize = histories.iter().map(|h| h.closed_count).sum();
+    let win_count: usize = histories.iter().map(|h| h.win_count).sum();
+    let win_rate = if closed_count > 0 {
+        win_count as f64 / closed_count as f64 * 100.0
+    } else {
+        0.0
+    };
+    let avg_invested = if closed_count > 0 {
+        total_deposit / closed_count as f64
+    } else {
+        0.0
+    };
+    let total_pnl_pct = if total_deposit > 0.0 {
+        total_pnl / total_deposit * 100.0
+    } else {
+        0.0
+    };
+
+    Json(json_ok(
+        "portfolio",
+        Ok(json!({
+            "summary": {
+                "totalPnlUsd": total_pnl,
+                "totalPnlPct": total_pnl_pct,
+                "allTimeDepositUsd": total_deposit,
+                "feesClaimedUsd": total_fees,
+                "closedCount": closed_count,
+                "winRate": win_rate,
+                "avgInvestedUsd": avg_invested,
+            },
+            "pools": histories,
+        })),
     ))
 }
 

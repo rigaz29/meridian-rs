@@ -511,6 +511,35 @@ h3 { font-size: 15px; }
 .positions-empty,
 .activity-empty { padding: 18px 6px; color: #aeb8cb; font-family: var(--font-mono); }
 
+.loss { color: #ff6f91 !important; }
+
+/* ── Portfolio / Historical widget ─────────────────────────────── */
+.portfolio-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: clamp(16px, 3vw, 44px);
+  padding: 14px 6px 16px;
+  border-bottom: 1px dashed rgba(168, 181, 211, 0.22);
+}
+.portfolio-summary .ps-stat { display: flex; flex-direction: column; gap: 4px; }
+.portfolio-summary .ps-stat span { color: #8e98ad; font-size: 12px; font-weight: 560; letter-spacing: -0.01em; }
+.portfolio-summary .ps-stat b { color: #e8edf8; font-size: 17px; font-weight: 800; }
+.portfolio-summary .ps-stat b em { font-style: normal; font-size: 12px; font-weight: 650; opacity: 0.85; }
+.portfolio-head,
+.portfolio-row {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 1fr 1fr 1fr;
+  align-items: center;
+  gap: 14px;
+}
+.portfolio-head { padding: 14px 6px 9px; color: #a8a2c4; font-size: 12px; font-weight: 600; letter-spacing: -0.02em; border-bottom: 1px solid rgba(177, 169, 211, 0.14); }
+.portfolio-rows { display: grid; gap: 2px; margin-top: 6px; }
+.portfolio-row { min-height: 46px; padding: 0 6px; color: #cbd4e6; font-size: 13px; font-weight: 600; border-bottom: 1px dashed rgba(168, 181, 211, 0.10); }
+.portfolio-row:hover { background: rgba(21, 20, 38, 0.5); }
+.portfolio-row .pr-pool { display: grid; gap: 2px; min-width: 0; }
+.portfolio-row .pr-pool strong { color: #e8edf8; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.portfolio-row .pr-pool small { color: #8e98ad; font-size: 11px; }
+
 .trades-card { min-height: 0; }
 .terminal-trades { padding: 26px 28px; }
 .compact { padding-bottom: 28px; }
