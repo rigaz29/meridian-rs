@@ -17,7 +17,7 @@ use crate::tools::study::study_top_lpers;
 use crate::tools::token::{
     check_smart_wallets_on_pool, get_token_holders, get_token_info, get_token_narrative,
 };
-use crate::tools::wallet::{get_wallet_balances, normalize_mint, swap_token, WalletBalances};
+use crate::tools::wallet::{get_wallet_balances, normalize_mint, swap_token};
 use crate::utils::logger::module::{info, warn};
 
 // ─── Tool Classification ────────────────────────────────────────
@@ -37,15 +37,6 @@ const LOCK_ON_SUCCESS: &[&str] = &["swap_token", "close_position"];
 
 const MAX_DECISION_LOG: usize = 100;
 const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
-const AUTO_SWAP_DUST_USD_THRESHOLD: f64 = 0.10;
-
-#[derive(Debug, Clone, PartialEq)]
-struct AutoSwapPlan {
-    mint: String,
-    symbol: String,
-    amount: f64,
-    usd: f64,
-}
 
 fn json_str<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter().find_map(|key| value.get(*key)?.as_str())
@@ -101,35 +92,6 @@ fn enrich_close_result_with_position_metadata(
     set_json_string_if_missing(result, "baseMint", Some(&position.base_mint));
     set_json_string_if_missing(result, "pool", Some(&position.pool_address));
     set_json_string_if_missing(result, "poolName", position.pool_name.as_deref());
-}
-
-fn plan_auto_swap_after_close(
-    close_result: &Value,
-    balances: &WalletBalances,
-    skip_swap: bool,
-) -> Option<AutoSwapPlan> {
-    if skip_swap || close_result.get("success").and_then(Value::as_bool) != Some(true) {
-        return None;
-    }
-    let base_mint = json_str(close_result, &["baseMint", "base_mint"])?;
-    let normalized_base = normalize_mint(base_mint);
-    if normalized_base == SOL_MINT {
-        return None;
-    }
-    let token = balances
-        .tokens
-        .iter()
-        .find(|token| normalize_mint(&token.mint) == normalized_base)?;
-    let usd = token.usd.unwrap_or(0.0);
-    if token.balance <= 0.0 || usd < AUTO_SWAP_DUST_USD_THRESHOLD {
-        return None;
-    }
-    Some(AutoSwapPlan {
-        mint: token.mint.clone(),
-        symbol: token.symbol.clone(),
-        amount: token.balance,
-        usd,
-    })
 }
 
 // ─── Decision Log ───────────────────────────────────────────────
@@ -892,51 +854,46 @@ impl ToolExecutor {
         skip_swap: bool,
         config: &Config,
     ) -> Result<()> {
-        if !config.management.sol_mode {
+        // Unless the caller wants to keep the token (e.g. a re-seed strategy),
+        // swap any claimed base token back to SOL. The balance is read straight
+        // from the wallet keypair, so this works regardless of sol_mode, of a
+        // dust USD estimate, or of whether MERIDIAN_WALLET is set.
+        if skip_swap {
+            return Ok(());
+        }
+        let Some(base_mint) = json_str(close_result, &["baseMint", "base_mint"]).map(str::to_string)
+        else {
+            return Ok(());
+        };
+        if base_mint.is_empty() || normalize_mint(&base_mint) == SOL_MINT {
             return Ok(());
         }
 
-        let rpc = config
-            .api
-            .helius_rpc_url
-            .as_deref()
-            .unwrap_or("https://api.mainnet-beta.solana.com");
-        let helius_key = config.api.helius_api_key.as_deref().unwrap_or("");
-        let balances = match get_wallet_balances(rpc, &self.wallet_address, helius_key).await {
-            Ok(balances) => balances,
-            Err(e) => {
-                if let Some(map) = close_result.as_object_mut() {
-                    map.insert(
-                        "autoSwapError".to_string(),
-                        Value::String(format!("wallet balance check failed: {}", e)),
-                    );
+        let balance =
+            match crate::tools::meteora_native::wallet_token_ui_balance(config, &base_mint).await {
+                Ok(balance) => balance,
+                Err(e) => {
+                    if let Some(map) = close_result.as_object_mut() {
+                        map.insert(
+                            "autoSwapError".to_string(),
+                            Value::String(format!("base-token balance check failed: {}", e)),
+                        );
+                    }
+                    return Ok(());
                 }
-                return Ok(());
-            }
-        };
-
-        let Some(plan) = plan_auto_swap_after_close(close_result, &balances, skip_swap) else {
+            };
+        if balance <= 0.0 {
             return Ok(());
-        };
+        }
 
         info(
             "executor",
-            &format!(
-                "Auto-swapping {} (${:.2}) back to SOL after close",
-                plan.symbol, plan.usd
-            ),
+            &format!("Auto-swapping {} of {} back to SOL after close", balance, base_mint),
         );
-        match swap_token(&plan.mint, plan.amount, 50, 100, config).await {
+        match swap_token(&base_mint, balance, 50, 100, config).await {
             Ok(swap) => {
                 if let Some(map) = close_result.as_object_mut() {
                     map.insert("autoSwapped".to_string(), Value::Bool(swap.success));
-                    map.insert(
-                        "autoSwapNote".to_string(),
-                        Value::String(format!(
-                            "Base token already auto-swapped back to SOL ({} → SOL). Do NOT call swap_token again.",
-                            plan.symbol
-                        )),
-                    );
                     if let Some(tx) = swap.tx {
                         map.insert("autoSwapTx".to_string(), Value::String(tx));
                     }
@@ -2120,42 +2077,6 @@ mod tests {
             .expect("message should be present")
             .contains("No LPAgent top LPer data"));
         assert!(parsed["lpers"].as_array().unwrap().is_empty());
-    }
-
-    #[test]
-    fn auto_swap_plan_uses_close_base_mint_when_value_is_not_dust() {
-        let close_result = json!({"success": true, "baseMint": "TokenMint111"});
-        let wallet_balances = balances(vec![TokenBalance {
-            mint: "TokenMint111".to_string(),
-            symbol: "TOK".to_string(),
-            balance: 12.5,
-            usd: Some(0.11),
-        }]);
-
-        let plan = plan_auto_swap_after_close(&close_result, &wallet_balances, false)
-            .expect("token worth >= $0.10 should be auto-swapped");
-
-        assert_eq!(plan.mint, "TokenMint111");
-        assert_eq!(plan.amount, 12.5);
-        assert_eq!(plan.usd, 0.11);
-    }
-
-    #[test]
-    fn auto_swap_plan_respects_skip_swap_dust_and_sol_mint() {
-        let token_result = json!({"success": true, "baseMint": "TokenMint111"});
-        let wallet_balances = balances(vec![TokenBalance {
-            mint: "TokenMint111".to_string(),
-            symbol: "TOK".to_string(),
-            balance: 12.5,
-            usd: Some(0.09),
-        }]);
-
-        assert!(plan_auto_swap_after_close(&token_result, &wallet_balances, true).is_none());
-        assert!(plan_auto_swap_after_close(&token_result, &wallet_balances, false).is_none());
-
-        let sol_result =
-            json!({"success": true, "baseMint": "So11111111111111111111111111111111111111112"});
-        assert!(plan_auto_swap_after_close(&sol_result, &wallet_balances, false).is_none());
     }
 
     #[test]
