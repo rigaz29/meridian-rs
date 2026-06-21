@@ -44,13 +44,16 @@ type WidgetLayout = {
 };
 
 const defaultWidgets: Record<WidgetId, WidgetLayout> = {
-  profile: { workspace: 1, x: 0, y: 0, width: 264, height: 520, minWidth: 240, minHeight: 420, z: 1 },
-  positions: { workspace: 1, x: 278, y: 0, width: 936, height: 424, minWidth: 680, minHeight: 300, z: 1 },
-  trades: { workspace: 1, x: 278, y: 436, width: 936, height: 712, minWidth: 520, minHeight: 220, z: 1 },
-  weather: { workspace: 1, x: 1228, y: 0, width: 468, height: 276, minWidth: 340, minHeight: 220, z: 1 },
-  music: { workspace: 1, x: 1228, y: 288, width: 468, height: 294, minWidth: 360, minHeight: 250, z: 1 },
-  candidates: { workspace: 1, x: 0, y: 532, width: 264, height: 616, minWidth: 260, minHeight: 260, z: 1 },
-  activity: { workspace: 1, x: 1228, y: 594, width: 468, height: 554, minWidth: 360, minHeight: 280, z: 1 },
+  // Workspace 1 — three aligned columns, each ending at ~1016px:
+  //   left   (profile + candidates), center (positions + historical),
+  //   right  (weather + music + activity). Heights fit content; columns bottom-align.
+  profile: { workspace: 1, x: 0, y: 0, width: 272, height: 440, minWidth: 240, minHeight: 360, z: 1 },
+  candidates: { workspace: 1, x: 0, y: 456, width: 272, height: 560, minWidth: 260, minHeight: 260, z: 1 },
+  positions: { workspace: 1, x: 288, y: 0, width: 924, height: 308, minWidth: 680, minHeight: 240, z: 1 },
+  trades: { workspace: 1, x: 288, y: 324, width: 924, height: 692, minWidth: 520, minHeight: 360, z: 1 },
+  weather: { workspace: 1, x: 1228, y: 0, width: 464, height: 264, minWidth: 340, minHeight: 220, z: 1 },
+  music: { workspace: 1, x: 1228, y: 280, width: 464, height: 280, minWidth: 360, minHeight: 250, z: 1 },
+  activity: { workspace: 1, x: 1228, y: 576, width: 464, height: 440, minWidth: 360, minHeight: 280, z: 1 },
   backendStatus: { workspace: 2, x: 0, y: 0, width: 620, height: 360, minWidth: 420, minHeight: 300, z: 1 },
   backendControls: { workspace: 2, x: 636, y: 0, width: 720, height: 560, minWidth: 520, minHeight: 420, z: 1 },
 };
