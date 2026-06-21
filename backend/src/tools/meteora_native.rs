@@ -145,23 +145,28 @@ fn sol_to_lamports(amount_sol: f64) -> Result<u64> {
 }
 
 fn strategy_type_from_name(strategy: &str) -> StrategyType {
-    // AddLiquidityByStrategy2 expects a *Balanced/*ImBalanced strategy type; the
-    // *OneSide variants belong to the dedicated one-side instruction and trigger
-    // InvalidStrategyParameters (0x17a6) here.
+    // Single-side SOL deposits (amount_x = 0) are IMBALANCED, so AddLiquidityByStrategy2
+    // needs the *ImBalanced strategy type. *Balanced requires both tokens in equal
+    // value (deposits ~0 when one side is empty, leaving wrapped SOL stuck); *OneSide
+    // belongs to a different instruction (InvalidStrategyParameters / 0x17a6). The
+    // original JS passes TS-SDK `StrategyType.Spot`, which maps to SpotImBalanced for
+    // single-side deposits.
     match strategy.to_ascii_lowercase().replace('-', "_").as_str() {
-        "curve" | "curve_one_side" | "curve_balanced" => StrategyType::CurveBalanced,
-        "bid_ask" | "bidask" | "bid_ask_one_side" | "bid_ask_balanced" => {
-            StrategyType::BidAskBalanced
+        "curve" | "curve_one_side" | "curve_balanced" | "curve_imbalanced" => {
+            StrategyType::CurveImBalanced
         }
-        _ => StrategyType::SpotBalanced,
+        "bid_ask" | "bidask" | "bid_ask_one_side" | "bid_ask_balanced" | "bid_ask_imbalanced" => {
+            StrategyType::BidAskImBalanced
+        }
+        _ => StrategyType::SpotImBalanced,
     }
 }
 
 fn strategy_name(strategy_type: StrategyType) -> &'static str {
     match strategy_type {
-        StrategyType::CurveBalanced => "curve_balanced",
-        StrategyType::BidAskBalanced => "bid_ask_balanced",
-        _ => "spot_balanced",
+        StrategyType::CurveImBalanced => "curve_imbalanced",
+        StrategyType::BidAskImBalanced => "bid_ask_imbalanced",
+        _ => "spot_imbalanced",
     }
 }
 
@@ -500,7 +505,7 @@ mod tests {
         assert_eq!(request.min_bin_id, 65);
         assert_eq!(request.max_bin_id, 100);
         assert_eq!(request.width, 36);
-        assert_eq!(request.strategy, "bid_ask_balanced");
+        assert_eq!(request.strategy, "bid_ask_imbalanced");
         assert_eq!(request.rpc_url, "https://rpc.example.test");
     }
 }
