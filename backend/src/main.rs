@@ -112,36 +112,71 @@ async fn reconcile_positions_on_chain(
     config: &config::Config,
     state_path: &str,
 ) {
+    let mut changed = 0;
+
+    // ── Prune: drop tracked-active positions that are gone on-chain ──
     let active_ids: Vec<String> = positions.get_active().iter().map(|p| p.id.clone()).collect();
-    if active_ids.is_empty() {
-        return;
-    }
-    match tools::meteora_native::existing_positions(config, &active_ids).await {
-        Ok(existing) => {
-            let mut pruned = 0;
-            for id in &active_ids {
-                if !existing.contains(id) && positions.mark_orphaned(id) {
-                    pruned += 1;
-                    warn(
-                        "reconcile",
-                        &format!(
-                            "Pruned phantom position {} (not found on-chain)",
-                            &id[..8.min(id.len())]
-                        ),
-                    );
+    if !active_ids.is_empty() {
+        match tools::meteora_native::existing_positions(config, &active_ids).await {
+            Ok(existing) => {
+                for id in &active_ids {
+                    if !existing.contains(id) && positions.mark_orphaned(id) {
+                        changed += 1;
+                        warn(
+                            "reconcile",
+                            &format!(
+                                "Pruned phantom position {} (not found on-chain)",
+                                &id[..8.min(id.len())]
+                            ),
+                        );
+                    }
                 }
             }
-            if pruned > 0 {
-                match positions.save(state_path) {
-                    Ok(()) => info(
-                        "reconcile",
-                        &format!("Reconciled state with chain — pruned {pruned} phantom position(s)"),
-                    ),
-                    Err(e) => warn("reconcile", &format!("Failed to persist pruned state: {e}")),
+            Err(e) => warn("reconcile", &format!("On-chain prune skipped: {e}")),
+        }
+    }
+
+    // ── Adopt: discover on-chain positions the state lost track of ──
+    match tools::meteora_native::discover_wallet_positions(config).await {
+        Ok(discovered) => {
+            for (pos_id, lb_pair) in discovered {
+                if positions.positions.contains_key(&pos_id) {
+                    continue;
                 }
+                let pool_name = tools::dlmm::get_pool_name(&lb_pair).await;
+                let base_mint = tools::meteora_native::pool_base_mint(config, &lb_pair)
+                    .await
+                    .unwrap_or_else(|_| lb_pair.clone());
+                positions.adopt(state::positions::TrackedPosition {
+                    id: pos_id.clone(),
+                    pool_address: lb_pair.clone(),
+                    pool_name: pool_name.clone(),
+                    base_mint,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    ..Default::default()
+                });
+                changed += 1;
+                info(
+                    "reconcile",
+                    &format!(
+                        "Adopted on-chain position {} in {}",
+                        &pos_id[..8.min(pos_id.len())],
+                        pool_name.as_deref().unwrap_or(&lb_pair)
+                    ),
+                );
             }
         }
-        Err(e) => warn("reconcile", &format!("On-chain reconcile skipped: {e}")),
+        Err(e) => warn("reconcile", &format!("On-chain discovery skipped: {e}")),
+    }
+
+    if changed > 0 {
+        match positions.save(state_path) {
+            Ok(()) => info(
+                "reconcile",
+                &format!("Reconciled state with chain — {changed} change(s)"),
+            ),
+            Err(e) => warn("reconcile", &format!("Failed to persist reconciled state: {e}")),
+        }
     }
 }
 

@@ -355,6 +355,27 @@ impl PositionState {
         }
     }
 
+    /// Adopt a position discovered on-chain that isn't tracked yet (e.g. a
+    /// deploy whose state write was lost). Inserts it as Active without firing a
+    /// Deploy event. No-op if already present.
+    pub fn adopt(&mut self, pos: TrackedPosition) {
+        if self.positions.contains_key(&pos.id) {
+            return;
+        }
+        let id = pos.id.clone();
+        let pool_display = pos
+            .pool_name
+            .clone()
+            .unwrap_or_else(|| pos.pool_address.clone());
+        self.positions.insert(pos.id.clone(), pos);
+        self.push_event(
+            EventType::Deploy,
+            &id,
+            &format!("Adopted on-chain position in {}", pool_display),
+        );
+        self.last_updated = Some(Utc::now().to_rfc3339());
+    }
+
     /// Mark a tracked position as orphaned: it no longer exists on-chain
     /// (a phantom from a failed/un-landed deploy, or closed outside the agent).
     /// Moves it to `Closed` so it leaves active management while keeping the

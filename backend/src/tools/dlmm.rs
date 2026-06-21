@@ -1538,6 +1538,14 @@ async fn get_pool_metadata(pool_address: &str) -> Option<PoolMetadata> {
     resp.json::<PoolMetadata>().await.ok()
 }
 
+/// Best-effort fetch of a pool's display name (e.g. "drooling-SOL").
+pub async fn get_pool_name(pool_address: &str) -> Option<String> {
+    get_pool_metadata(pool_address)
+        .await
+        .and_then(|meta| meta.name)
+        .filter(|name| !name.is_empty())
+}
+
 /// Best-effort fetch of a token's icon URL (the same IPFS image Meteora shows),
 /// via the pool-discovery search API keyed by mint. Returns None on any miss.
 pub async fn get_token_icon(mint: &str) -> Option<String> {
