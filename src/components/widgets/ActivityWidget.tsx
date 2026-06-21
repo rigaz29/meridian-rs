@@ -9,8 +9,11 @@ type Decision = {
   timestamp?: string;
   tool?: string;
   action?: string;
+  type?: string;
   pair?: string;
   pool?: string;
+  pool_name?: string;
+  position?: string;
   args?: {
     pool?: string;
     pool_address?: string;
@@ -18,13 +21,22 @@ type Decision = {
   };
   message?: string;
   reason?: string;
+  summary?: string | Record<string, unknown>;
   resultSummary?: string;
-  result?: string | {
-    note?: string;
-    pool?: string;
-    success?: boolean;
-  };
+  result?: string | Record<string, unknown>;
   success?: boolean;
+};
+
+type LogEntry = { time: string; label: string; kind: string; pair: string; message: string };
+
+const EVENT_COLORS: Record<string, string> = {
+  deploy: '#22c55e',
+  close: '#f97316',
+  claim: '#2dd4bf',
+  screen: '#8b5cf6',
+  swap: '#38bdf8',
+  fail: '#ef4444',
+  info: '#7c84a3',
 };
 
 type StatusPayload = {
@@ -51,30 +63,81 @@ const formatAge = (timestamp?: string) => {
   return `${Math.floor(hours / 24)}d ago`;
 };
 
-const shortPool = (value?: string) => value ? `${value.slice(0, 4)}...${value.slice(-4)}` : '-';
+const shortAddr = (value?: string) => value ? `${value.slice(0, 4)}…${value.slice(-4)}` : '-';
 
-const decisionText = (decision: Decision) => {
-  if (decision.message) return decision.message;
-  if (decision.reason) return decision.reason;
-  if (decision.resultSummary) return decision.resultSummary;
-  if (typeof decision.result === 'string') return decision.result;
-  if (decision.result?.note) return decision.result.note;
-  return decision.tool ?? decision.action ?? 'Backend decision';
+const asObject = (value: unknown): Record<string, any> | null => {
+  if (!value) return null;
+  if (typeof value === 'object') return value as Record<string, any>;
+  if (typeof value === 'string') {
+    try { return JSON.parse(value); } catch { return null; }
+  }
+  return null;
 };
 
-const mapDecision = (decision: Decision): [string, string, string, string] => {
-  const pool = decision.pair ?? decision.pool ?? decision.args?.pool ?? decision.args?.pool_address ?? (typeof decision.result === 'object' ? decision.result.pool : undefined);
+const num = (value: unknown, digits = 4) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toFixed(digits) : null;
+};
 
-  return [
-    formatAge(decision.timestamp),
-    decision.success === false ? 'no_deploy' : 'deploy',
-    shortPool(pool),
-    decisionText(decision),
-  ];
+// Classify a decision into a short event label + colour kind.
+const eventOf = (decision: Decision): { label: string; kind: string } => {
+  const tool = (decision.tool ?? decision.action ?? '').toLowerCase();
+  if (decision.success === false) return { label: 'FAIL', kind: 'fail' };
+  if (tool.includes('deploy')) return { label: 'DEPLOY', kind: 'deploy' };
+  if (tool.includes('close')) return { label: 'CLOSE', kind: 'close' };
+  if (tool.includes('claim')) return { label: 'CLAIM', kind: 'claim' };
+  if (tool.includes('swap')) return { label: 'SWAP', kind: 'swap' };
+  if (tool.includes('screen')) return { label: 'SCREEN', kind: 'screen' };
+  if (tool.includes('balance') || tool.includes('wallet')) return { label: 'INFO', kind: 'info' };
+  return { label: 'OK', kind: 'info' };
+};
+
+// Build a concise, human-readable message instead of dumping raw JSON.
+const humanMessage = (decision: Decision): string => {
+  const tool = (decision.tool ?? decision.action ?? '').toLowerCase();
+  const data = asObject(decision.result) ?? asObject(decision.resultSummary) ?? asObject(decision.summary) ?? {};
+  const name = decision.pool_name ?? (data.poolName as string) ?? '';
+
+  if (tool.includes('balance') || tool.includes('wallet')) {
+    const sol = num(data.sol ?? data.balanceSol);
+    return sol ? `Wallet balance ${sol} SOL` : 'Checked wallet balance';
+  }
+  if (tool.includes('deploy')) {
+    const amt = num(data.amountY ?? data.amount_sol, 3);
+    return `Deployed ${name || 'position'}${amt ? ` · ${amt} SOL` : ''}`;
+  }
+  if (tool.includes('close')) {
+    return `Closed ${name || 'position'}`;
+  }
+  if (tool.includes('claim')) {
+    const fees = num(data.fees_claimed ?? data.claimable_fee_sol);
+    return fees ? `Claimed ${fees} SOL fees${name ? ` · ${name}` : ''}` : `Claimed fees${name ? ` · ${name}` : ''}`;
+  }
+  if (tool.includes('swap')) {
+    return `Swapped${name ? ` · ${name}` : ''} to SOL`;
+  }
+  if (tool.includes('screen')) {
+    return decision.reason || (data.note as string) || 'Screening cycle';
+  }
+  return decision.reason || decision.message || (name ? `${tool || 'action'} · ${name}` : (tool || 'Backend action'));
+};
+
+const mapDecision = (decision: Decision): LogEntry => {
+  const { label, kind } = eventOf(decision);
+  const pair = decision.pool_name
+    ?? decision.pair
+    ?? shortAddr(decision.pool ?? decision.args?.pool ?? decision.args?.pool_address ?? decision.position);
+  return {
+    time: formatAge(decision.timestamp),
+    label,
+    kind,
+    pair,
+    message: humanMessage(decision),
+  };
 };
 
 export const ActivityWidget = () => {
-  const [logs, setLogs] = useState<Array<[string, string, string, string]>>([]);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
 
   useEffect(() => {
     let isMounted = true;
@@ -87,11 +150,10 @@ export const ActivityWidget = () => {
         ]);
         const decisions = Array.isArray(payload?.data?.decisions) ? payload.data.decisions : [];
         const status = statusPayload?.data as StatusPayload | undefined;
-        const fallbackLogs: Array<[string, string, string, string]> = status ? [
-          ['now', 'deploy', '-', `Backend ${status.status ?? 'running'} · dryRun=${status.dry_run ? 'true' : 'false'}`],
-          ['now', 'deploy', '-', `Active positions: ${status.active_positions ?? 0}`],
-          ['now', 'deploy', '-', `Screen ${status.schedule?.screeningIntervalMin ?? '-'}m · Manage ${status.schedule?.managementIntervalMin ?? '-'}m`],
-          ['now', 'deploy', '-', `State: ${status.state_path ? 'connected' : 'not set'}`],
+        const fallbackLogs: LogEntry[] = status ? [
+          { time: 'now', label: 'INFO', kind: 'info', pair: '-', message: `Backend ${status.status ?? 'running'} · dryRun=${status.dry_run ? 'true' : 'false'}` },
+          { time: 'now', label: 'INFO', kind: 'info', pair: '-', message: `Active positions: ${status.active_positions ?? 0}` },
+          { time: 'now', label: 'INFO', kind: 'info', pair: '-', message: `Screen ${status.schedule?.screeningIntervalMin ?? '-'}m · Manage ${status.schedule?.managementIntervalMin ?? '-'}m` },
         ] : [];
 
         if (isMounted) setLogs(decisions.length ? decisions.slice(0, 8).map(mapDecision) : fallbackLogs);
@@ -114,12 +176,20 @@ export const ActivityWidget = () => {
       <div className="terminal-divider" />
       <div className="activity-head"><span>TIME</span><span>EVENT</span><span>PAIR</span><span>MESSAGE</span></div>
       <div className="log-list">
-        {logs.length ? logs.map(([time, type, pair, text], index) => (
-          <div className="log-row" key={`${time}-${index}`}>
-            <span>{time}</span>
-            <b className={type === 'deploy' ? 'deploy' : 'no-deploy'}>{type === 'deploy' ? 'OK' : 'SKIP'}</b>
-            <strong>{pair}</strong>
-            <p><i>$</i> {text}</p>
+        {logs.length ? logs.map((log, index) => (
+          <div className="log-row" key={`${log.time}-${index}`}>
+            <span>{log.time}</span>
+            <b
+              style={{
+                color: EVENT_COLORS[log.kind] ?? EVENT_COLORS.info,
+                background: `${EVENT_COLORS[log.kind] ?? EVENT_COLORS.info}1f`,
+                border: `1px solid ${EVENT_COLORS[log.kind] ?? EVENT_COLORS.info}55`,
+              }}
+            >
+              {log.label}
+            </b>
+            <strong title={log.pair}>{log.pair}</strong>
+            <p title={log.message}>{log.message}</p>
           </div>
         )) : <div className="activity-empty">No backend decisions yet.</div>}
       </div>
