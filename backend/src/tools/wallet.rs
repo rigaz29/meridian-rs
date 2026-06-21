@@ -28,11 +28,26 @@ pub fn load_keypair_from_secret(secret: &str) -> Result<Keypair> {
         anyhow::bail!("wallet private key is empty");
     }
 
-    let bytes = if trimmed.starts_with('[') {
-        serde_json::from_str::<Vec<u8>>(trimmed)
-            .map_err(|e| anyhow!("failed to parse wallet private key JSON array: {}", e))?
+    // Support referencing a Solana CLI keypair by FILE PATH (e.g. id.json).
+    // Safer than pasting the raw secret into env — the key is read at runtime
+    // and never echoed. Detected when the value isn't itself a JSON array and
+    // points to an existing file (use forward slashes on Windows so the path
+    // survives .env parsing).
+    let source = if !trimmed.starts_with('[') && std::path::Path::new(trimmed).is_file() {
+        std::fs::read_to_string(trimmed)
+            .map_err(|e| anyhow!("failed to read keypair file {}: {}", trimmed, e))?
+            .trim()
+            .to_string()
     } else {
-        bs58::decode(trimmed)
+        trimmed.to_string()
+    };
+    let source = source.as_str();
+
+    let bytes = if source.starts_with('[') {
+        serde_json::from_str::<Vec<u8>>(source)
+            .map_err(|e| anyhow!("failed to parse wallet keypair JSON array: {}", e))?
+    } else {
+        bs58::decode(source)
             .into_vec()
             .map_err(|e| anyhow!("failed to decode wallet private key as base58: {}", e))?
     };
@@ -326,32 +341,53 @@ fn get_referral_params(config: &Config) -> Option<(String, u32)> {
 
 // ─── Public API ──────────────────────────────────────────────────
 
-/// Get wallet balances (SOL + tokens) via Helius Wallet API.
-///
-/// Calls `https://api.helius.xyz/v1/wallet/{address}/balances` and
-/// returns a `WalletBalances` struct with SOL, USDC, and all SPL tokens.
-pub async fn get_wallet_balances(
-    _rpc_url: &str,
-    pubkey: &str,
-    helius_api_key: &str,
-) -> Result<WalletBalances> {
-    let client = reqwest::Client::new();
-
-    let url = format!(
-        "https://api.helius.xyz/v1/wallet/{}/balances?api-key={}",
-        pubkey, helius_api_key,
-    );
-
+/// Minimal Solana JSON-RPC POST helper. Returns the parsed `result` value, or
+/// `None` on transport/parse failure.
+async fn rpc_call(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> Option<serde_json::Value> {
     let resp = client
-        .get(&url)
+        .post(rpc_url)
         .timeout(std::time::Duration::from_secs(15))
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": method, "params": params,
+        }))
         .send()
         .await
-        .map_err(|e| anyhow!("Helius API request failed: {}", e))?;
+        .ok()?
+        .json::<serde_json::Value>()
+        .await
+        .ok()?;
+    resp.get("result").cloned()
+}
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const SPL_TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+
+/// Get wallet balances (SOL + SPL tokens) via Solana RPC.
+///
+/// Uses `getBalance` for SOL and `getTokenAccountsByOwner` for SPL tokens. The
+/// legacy `api.helius.xyz/v1/wallet` endpoint is deprecated, so the RPC URL is
+/// expected to carry its own auth (e.g. Helius `?api-key=`). SOL price is a
+/// best-effort Jupiter lookup; per-token USD values are not resolved here.
+pub async fn get_wallet_balances(
+    rpc_url: &str,
+    pubkey: &str,
+    _helius_api_key: &str,
+) -> Result<WalletBalances> {
+    let client = reqwest::Client::new();
+    let rpc = if rpc_url.is_empty() {
+        "https://api.mainnet-beta.solana.com"
+    } else {
+        rpc_url
+    };
+
+    // ── SOL balance (lamports) ───────────────────────────────────
+    let Some(sol_result) = rpc_call(&client, rpc, "getBalance", serde_json::json!([pubkey])).await
+    else {
         return Ok(WalletBalances {
             wallet: Some(pubkey.to_string()),
             sol: 0.0,
@@ -360,57 +396,57 @@ pub async fn get_wallet_balances(
             usdc: 0.0,
             tokens: vec![],
             total_usd: 0.0,
-            error: Some(format!("Helius API error: {} {}", status, body)),
+            error: Some("RPC getBalance request failed".to_string()),
         });
+    };
+    let lamports = sol_result
+        .get("value")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let sol_balance = lamports as f64 / 1_000_000_000.0;
+
+    // ── SPL token accounts ───────────────────────────────────────
+    let mut tokens: Vec<TokenBalance> = vec![];
+    let mut usdc_balance = 0.0;
+    let token_result = rpc_call(
+        &client,
+        rpc,
+        "getTokenAccountsByOwner",
+        serde_json::json!([
+            pubkey,
+            { "programId": SPL_TOKEN_PROGRAM },
+            { "encoding": "jsonParsed" }
+        ]),
+    )
+    .await;
+    if let Some(accounts) = token_result
+        .as_ref()
+        .and_then(|r| r.get("value"))
+        .and_then(serde_json::Value::as_array)
+    {
+        for acc in accounts {
+            let info = &acc["account"]["data"]["parsed"]["info"];
+            let mint = info["mint"].as_str().unwrap_or("").to_string();
+            let amount = info["tokenAmount"]["uiAmount"].as_f64().unwrap_or(0.0);
+            if mint.is_empty() || amount <= 0.0 {
+                continue;
+            }
+            if mint == USDC_MINT {
+                usdc_balance = amount;
+            }
+            let symbol = mint.chars().take(8).collect::<String>();
+            tokens.push(TokenBalance {
+                mint,
+                symbol,
+                balance: amount,
+                usd: None,
+            });
+        }
     }
 
-    let data: HeliusBalancesResponse = resp
-        .json()
-        .await
-        .map_err(|e| anyhow!("Failed to parse Helius response: {}", e))?;
-
-    let balances = data.balances.unwrap_or_default();
-
-    // Find SOL and USDC entries
-    let sol_entry = balances
-        .iter()
-        .find(|b| b.mint.as_deref() == Some(SOL_MINT) || b.symbol.as_deref() == Some("SOL"));
-    let usdc_entry = balances.iter().find(|b| {
-        b.mint.as_deref() == Some("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
-            || b.symbol.as_deref() == Some("USDC")
-    });
-
-    let sol_balance = sol_entry.as_ref().and_then(|e| e.balance).unwrap_or(0.0);
-    let sol_price = sol_entry
-        .as_ref()
-        .and_then(|e| e.price_per_token)
-        .unwrap_or(0.0);
-    let sol_usd = sol_entry.as_ref().and_then(|e| e.usd_value).unwrap_or(0.0);
-    let usdc_balance = usdc_entry.as_ref().and_then(|e| e.balance).unwrap_or(0.0);
-
-    // Map all tokens
-    let tokens: Vec<TokenBalance> = balances
-        .into_iter()
-        .map(|b| {
-            let mint_str = b.mint.unwrap_or_default();
-            let symbol = b
-                .symbol
-                .or_else(|| {
-                    if mint_str.is_empty() {
-                        None
-                    } else {
-                        Some(mint_str.chars().take(8).collect::<String>())
-                    }
-                })
-                .unwrap_or_else(|| "unknown".to_string());
-            TokenBalance {
-                mint: mint_str,
-                symbol,
-                balance: b.balance.unwrap_or(0.0),
-                usd: b.usd_value.map(|v| round(v, 2)),
-            }
-        })
-        .collect();
+    // ── SOL price (best-effort) ──────────────────────────────────
+    let sol_price = get_sol_price().await.unwrap_or(0.0);
+    let sol_usd = sol_balance * sol_price;
 
     Ok(WalletBalances {
         wallet: Some(pubkey.to_string()),
@@ -419,7 +455,7 @@ pub async fn get_wallet_balances(
         sol_usd: round(sol_usd, 2),
         usdc: round(usdc_balance, 2),
         tokens,
-        total_usd: round(data.total_usd_value.unwrap_or(0.0), 2),
+        total_usd: round(sol_usd + usdc_balance, 2),
         error: None,
     })
 }
@@ -823,6 +859,22 @@ mod tests {
         let decoded = load_keypair_from_secret(&json).expect("json array keypair should decode");
 
         assert_eq!(decoded.pubkey(), keypair.pubkey());
+    }
+
+    #[test]
+    fn load_keypair_from_solana_cli_file_path_preserves_pubkey() {
+        // Mirrors the Solana CLI id.json format: a JSON array of 64 bytes.
+        let keypair = solana_sdk::signature::Keypair::new();
+        let json =
+            serde_json::to_string(&keypair.to_bytes().to_vec()).expect("serialize keypair bytes");
+        let path = std::env::temp_dir().join(format!("meridian-keypair-{}.json", keypair.pubkey()));
+        std::fs::write(&path, &json).expect("write temp keypair file");
+
+        let decoded = load_keypair_from_secret(&path.to_string_lossy())
+            .expect("keypair file path should decode");
+        assert_eq!(decoded.pubkey(), keypair.pubkey());
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

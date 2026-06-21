@@ -244,6 +244,10 @@ pub struct DeployResult {
     pub pool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool_name: Option<String>,
+    /// Base (non-SOL) token mint, resolved from pool metadata so trackers/UI
+    /// don't fall back to the pool address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_mint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bin_range: Option<BinRange>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -888,6 +892,23 @@ pub async fn deploy_position(
 
     // Fetch pool metadata for additional info
     let pool_meta = get_pool_metadata(&pool_address).await;
+    // Base (non-SOL) token mint from pool metadata. The Meteora API uses
+    // snake_case (`token_x`/`token_y`) while PoolMetadata renames to camelCase,
+    // so the typed fields are empty and the data lands in `extra`. Read the mint
+    // from there; token_x is the base token, token_y the quote (usually SOL).
+    let base_token_mint = pool_meta.as_ref().and_then(|m| {
+        let mint_of = |key: &str| {
+            m.extra
+                .get(key)
+                .and_then(|v| v.get("address"))
+                .and_then(|a| a.as_str())
+                .map(str::to_string)
+        };
+        mint_of("token_x")
+            .filter(|mint| mint != crate::tools::wallet::SOL_MINT)
+            .or_else(|| mint_of("token_y").filter(|mint| mint != crate::tools::wallet::SOL_MINT))
+            .or_else(|| mint_of("token_x"))
+    });
     let bin_step = pool_meta
         .as_ref()
         .and_then(|m| m.extra.get("bin_step"))
@@ -907,11 +928,19 @@ pub async fn deploy_position(
         bin_step,
     );
     let range_coverage = estimate_range_coverage(active_bin.price, price_range.as_ref());
-    let safety_checks = Some(vec![
+    // Descriptive guardrails for this deploy. The wide-range note is only
+    // relevant when the requested range actually exceeds the native path's
+    // limit (>69 bins); otherwise it's omitted so callers don't misread a
+    // normal deploy as rejected.
+    let mut safety_check_list = vec![
         "single_side_sol_only".to_string(),
-        "wide_range_rejected_until_extended_position_path_exists".to_string(),
         "native_path_does_not_initialize_bin_arrays".to_string(),
-    ]);
+    ];
+    if is_wide_range {
+        safety_check_list
+            .push("wide_range_rejected_until_extended_position_path_exists".to_string());
+    }
+    let safety_checks = Some(safety_check_list);
 
     if is_dry_run(config) {
         return Ok(DeployResult {
@@ -919,6 +948,7 @@ pub async fn deploy_position(
             position: None,
             pool: Some(pool_address),
             pool_name: pool_meta.as_ref().and_then(|m| m.name.clone()),
+            base_mint: base_token_mint.clone(),
             bin_range: Some(BinRange {
                 min: min_bin_id,
                 max: max_bin_id,
@@ -936,7 +966,9 @@ pub async fn deploy_position(
             txs: None,
             error: None,
             note: Some(format!(
-                "DRY RUN — would deploy {:.4} SOL with {} bins below, {} bins above",
+                "DRY RUN OK (simulated, not broadcast): all safety checks passed; would deploy \
+                 {:.4} SOL with {} bins below, {} bins above. This is a successful simulation — \
+                 no transaction was submitted.",
                 amount_sol, bins_below_val, bins_above_val,
             )),
         });
@@ -948,6 +980,7 @@ pub async fn deploy_position(
             position: None,
             pool: Some(pool_address),
             pool_name: pool_meta.as_ref().and_then(|m| m.name.clone()),
+            base_mint: base_token_mint.clone(),
             bin_range: Some(BinRange {
                 min: min_bin_id,
                 max: max_bin_id,
@@ -990,6 +1023,7 @@ pub async fn deploy_position(
                 position: Some(result.position_address),
                 pool: Some(pool_address),
                 pool_name: pool_meta.as_ref().and_then(|m| m.name.clone()),
+                base_mint: base_token_mint.clone(),
                 bin_range: Some(BinRange {
                     min: min_bin_id,
                     max: max_bin_id,
@@ -1016,6 +1050,7 @@ pub async fn deploy_position(
                 position: None,
                 pool: Some(pool_address),
                 pool_name: pool_meta.as_ref().and_then(|m| m.name.clone()),
+                base_mint: base_token_mint.clone(),
                 bin_range: Some(BinRange {
                     min: min_bin_id,
                     max: max_bin_id,
@@ -1465,9 +1500,11 @@ mod tests {
             .contains("DRY RUN"));
         let safety_checks = deploy.safety_checks.as_ref().expect("safety checks");
         assert!(safety_checks.contains(&"single_side_sol_only".to_string()));
-        assert!(safety_checks
-            .contains(&"wide_range_rejected_until_extended_position_path_exists".to_string()));
         assert!(safety_checks.contains(&"native_path_does_not_initialize_bin_arrays".to_string()));
+        // 35 bins is within the native path's limit, so the wide-range note must
+        // NOT appear — callers should not see a normal deploy as rejected.
+        assert!(!safety_checks
+            .contains(&"wide_range_rejected_until_extended_position_path_exists".to_string()));
         assert_eq!(deploy.wide_range, Some(false));
 
         let close = close_position(position, Some("test dry-run"), &config)

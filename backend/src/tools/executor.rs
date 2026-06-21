@@ -1504,10 +1504,13 @@ impl ToolExecutor {
                                         id: position_id,
                                         pool_address: pool.to_string(),
                                         pool_name,
-                                        base_mint: args["base_mint"]
-                                            .as_str()
-                                            .unwrap_or(pool)
-                                            .to_string(),
+                                        base_mint: result
+                                            .base_mint
+                                            .clone()
+                                            .or_else(|| {
+                                                args["base_mint"].as_str().map(str::to_string)
+                                            })
+                                            .unwrap_or_else(|| pool.to_string()),
                                         base_symbol,
                                         strategy: strategy.map(str::to_string),
                                         amount_x: result.amount_x.unwrap_or(0.0),
@@ -1582,7 +1585,11 @@ impl ToolExecutor {
                                 id: position_id,
                                 pool_address: pool.to_string(),
                                 pool_name,
-                                base_mint: args["base_mint"].as_str().unwrap_or(pool).to_string(),
+                                base_mint: result
+                                    .base_mint
+                                    .clone()
+                                    .or_else(|| args["base_mint"].as_str().map(str::to_string))
+                                    .unwrap_or_else(|| pool.to_string()),
                                 base_symbol,
                                 strategy: strategy.map(str::to_string),
                                 amount_x: result.amount_x.unwrap_or(0.0),
