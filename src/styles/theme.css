@@ -619,6 +619,9 @@ h3 { font-size: 15px; }
   scrollbar-width: thin;
 }
 .dash-main > *, .dash-rail > * { flex: 0 0 auto; }
+/* Last panel in the center/right column grows to fill remaining height, so the
+   columns reach the bottom like the sidebar instead of leaving a wallpaper gap. */
+.dash-main > :last-child, .dash-rail > :last-child { flex: 1 1 auto; }
 /* Make every center/right panel a solid dark card matching the sidebar, so the
    whole dashboard reads as one cohesive app (not glass over the wallpaper). */
 .dash-main > .glass-card,
