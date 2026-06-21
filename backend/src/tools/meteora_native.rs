@@ -64,6 +64,9 @@ pub struct NativeClaimResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeCloseResult {
     pub signature: String,
+    /// Signature of the follow-up tx that unwrapped wSOL back to native SOL, if
+    /// any wSOL was present after the close. `None` when nothing needed sweeping.
+    pub unwrap_signature: Option<String>,
     pub remove_liquidity_amount_x: u64,
     pub remove_liquidity_amount_y: u64,
     pub claimable_fee_x: u64,
@@ -365,6 +368,78 @@ pub async fn claim_fees(position_address: &str, config: &Config) -> Result<Nativ
     })
 }
 
+/// SPL Token program id.
+const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+/// Native mint (wrapped SOL).
+const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
+/// SPL Token `CloseAccount` instruction discriminator.
+const SPL_TOKEN_CLOSE_ACCOUNT_IX: u8 = 9;
+
+/// Close every wSOL token account owned by `keypair`, unwrapping the balance
+/// (wrapped principal + account rent) back to native SOL on the same wallet.
+///
+/// The `CloseAccount` instruction is built by hand (program id + 3 accounts +
+/// a single discriminator byte) to avoid pulling an spl-token crate whose
+/// solana types would clash with the v3 transaction stack used here.
+///
+/// Returns the sweep tx signature, or `None` when the wallet holds no wSOL.
+/// Build an SPL Token `CloseAccount` instruction by hand. Closing a wSOL
+/// account transfers its lamports (wrapped principal + rent) to `destination`,
+/// which is how an unwrap is performed.
+fn close_wsol_account_ix(
+    token_program: Pubkey,
+    account: Pubkey,
+    owner: Pubkey,
+) -> solana_sdk_v3::instruction::Instruction {
+    use solana_sdk_v3::instruction::{AccountMeta, Instruction};
+    Instruction {
+        program_id: token_program,
+        accounts: vec![
+            AccountMeta::new(account, false), // wSOL account to close
+            AccountMeta::new(owner, false),   // lamports destination
+            AccountMeta::new_readonly(owner, true), // account owner (signer)
+        ],
+        data: vec![SPL_TOKEN_CLOSE_ACCOUNT_IX],
+    }
+}
+
+async fn unwrap_wsol(rpc: &RpcClient, keypair: &Keypair) -> Result<Option<String>> {
+    use solana_client_v3::rpc_request::TokenAccountsFilter;
+    use solana_sdk_v3::instruction::Instruction;
+    use solana_sdk_v3::transaction::Transaction;
+
+    let owner = keypair.pubkey();
+    let wsol_mint = Pubkey::from_str(WSOL_MINT)?;
+    let token_program = Pubkey::from_str(SPL_TOKEN_PROGRAM_ID)?;
+
+    let accounts = rpc
+        .get_token_accounts_by_owner(&owner, TokenAccountsFilter::Mint(wsol_mint))
+        .await
+        .map_err(|e| anyhow!("list wSOL token accounts: {}", e))?;
+
+    let instructions: Vec<Instruction> = accounts
+        .iter()
+        .filter_map(|acc| Pubkey::from_str(&acc.pubkey).ok())
+        .map(|account| close_wsol_account_ix(token_program, account, owner))
+        .collect();
+
+    if instructions.is_empty() {
+        return Ok(None);
+    }
+
+    let blockhash = rpc
+        .get_latest_blockhash()
+        .await
+        .map_err(|e| anyhow!("fetch blockhash for wSOL unwrap: {}", e))?;
+    let tx = Transaction::new_signed_with_payer(&instructions, Some(&owner), &[keypair], blockhash);
+    let signature = rpc
+        .send_and_confirm_transaction(&tx)
+        .await
+        .map_err(|e| anyhow!("send wSOL unwrap tx: {}", e))?;
+
+    Ok(Some(signature.to_string()))
+}
+
 pub async fn close_position(
     position_address: &str,
     config: &Config,
@@ -389,8 +464,25 @@ pub async fn close_position(
         .await
         .map_err(|e| anyhow!("native Meteora close_position_one_shot failed: {}", e))?;
 
+    // Removing single-side SOL liquidity returns the principal as wrapped SOL
+    // (wSOL) in a token account; the close itself does not unwrap it. Sweep any
+    // wSOL accounts back to native SOL so the freed capital is spendable again.
+    // Non-fatal: the position is already closed, so log and continue on failure.
+    let unwrap_signature = match unwrap_wsol(&rpc_ctx.client, &keypair).await {
+        Ok(Some(sig)) => {
+            tracing::info!(unwrap_signature = %sig, "unwrapped wSOL to native SOL after close");
+            Some(sig)
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to auto-unwrap wSOL after close (funds safe as wSOL)");
+            None
+        }
+    };
+
     Ok(NativeCloseResult {
         signature: result.signature.to_string(),
+        unwrap_signature,
         remove_liquidity_amount_x: result.quote.remove_liquidity_amount_x,
         remove_liquidity_amount_y: result.quote.remove_liquidity_amount_y,
         claimable_fee_x: result.quote.claimable_fee_x,
@@ -411,6 +503,32 @@ mod tests {
             .expect("v2 wallet secret should parse into native SDK keypair");
 
         assert_eq!(pubkey, keypair.pubkey().to_string());
+    }
+
+    #[test]
+    fn close_wsol_account_ix_has_correct_shape() {
+        let token_program = Pubkey::from_str(SPL_TOKEN_PROGRAM_ID).unwrap();
+        let account = Pubkey::new_unique();
+        let owner = Pubkey::new_unique();
+
+        let ix = close_wsol_account_ix(token_program, account, owner);
+
+        assert_eq!(ix.program_id, token_program);
+        // CloseAccount discriminator, no extra payload.
+        assert_eq!(ix.data, vec![SPL_TOKEN_CLOSE_ACCOUNT_IX]);
+        assert_eq!(ix.accounts.len(), 3);
+        // [0] account being closed — writable, not signer.
+        assert_eq!(ix.accounts[0].pubkey, account);
+        assert!(ix.accounts[0].is_writable);
+        assert!(!ix.accounts[0].is_signer);
+        // [1] lamports destination (owner) — writable, not signer.
+        assert_eq!(ix.accounts[1].pubkey, owner);
+        assert!(ix.accounts[1].is_writable);
+        assert!(!ix.accounts[1].is_signer);
+        // [2] owner authority — signer, read-only.
+        assert_eq!(ix.accounts[2].pubkey, owner);
+        assert!(ix.accounts[2].is_signer);
+        assert!(!ix.accounts[2].is_writable);
     }
 
     #[test]

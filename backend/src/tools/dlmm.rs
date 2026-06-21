@@ -1110,22 +1110,29 @@ pub async fn close_position(
     match crate::tools::meteora_native::close_position(&position_address, config, None).await {
         Ok(result) => {
             tracing::info!(
-                "native close_position result: signature={} remove_x={} remove_y={} fee_x={} fee_y={} rewards={:?}",
+                "native close_position result: signature={} unwrap={} remove_x={} remove_y={} fee_x={} fee_y={} rewards={:?}",
                 result.signature,
+                result.unwrap_signature.as_deref().unwrap_or("none"),
                 result.remove_liquidity_amount_x,
                 result.remove_liquidity_amount_y,
                 result.claimable_fee_x,
                 result.claimable_fee_y,
                 result.claimable_rewards,
             );
+            // Surface both the close and the wSOL-unwrap sweep (when present) so
+            // the dashboard shows the full chain of on-chain actions.
+            let mut signatures = vec![result.signature.clone()];
+            if let Some(unwrap_sig) = result.unwrap_signature.clone() {
+                signatures.push(unwrap_sig);
+            }
             Ok(CloseResult {
                 success: true,
                 position: Some(position_address),
                 pool: None,
                 pool_name: None,
                 claim_txs: None,
-                close_txs: Some(vec![result.signature.clone()]),
-                txs: Some(vec![result.signature]),
+                close_txs: Some(signatures.clone()),
+                txs: Some(signatures),
                 pnl_usd: None,
                 pnl_pct: None,
                 base_mint: None,
