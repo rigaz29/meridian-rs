@@ -264,10 +264,21 @@ pub struct StrategyConfig {
     pub max_bins_below: u32,
     #[serde(default = "default_min_safe_bins")]
     pub min_safe_bins_below: u32,
+    /// Target fraction of downside price the single-side range should cover
+    /// (e.g. 0.40 = 40%). When the caller doesn't pin bins_below explicitly,
+    /// the deploy sizes the bin count from this and the pool's bin_step so the
+    /// range stays consistent across pools instead of going out-of-range fast
+    /// on tight (low-bin_step) pools.
+    #[serde(default = "default_target_downside_pct")]
+    pub target_downside_pct: f64,
 }
 
 fn default_min_safe_bins() -> u32 {
     35
+}
+
+fn default_target_downside_pct() -> f64 {
+    0.40
 }
 
 impl Default for StrategyConfig {
@@ -276,6 +287,7 @@ impl Default for StrategyConfig {
             min_bins_below: 15,
             max_bins_below: 50,
             min_safe_bins_below: 35,
+            target_downside_pct: default_target_downside_pct(),
         }
     }
 }
@@ -623,6 +635,7 @@ impl Default for Config {
                 min_bins_below: 15,
                 max_bins_below: 50,
                 min_safe_bins_below: 35,
+                target_downside_pct: default_target_downside_pct(),
             },
             dual_strategy: DualStrategyConfig::default(),
             tokens: TokensConfig::default(),

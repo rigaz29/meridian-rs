@@ -844,6 +844,27 @@ pub async fn get_position_pnl(
 
 /// Deploy a new DLMM position (place SOL into a pool).
 ///
+/// Single-position bin cap: the native deploy path can't span more than ~69
+/// bins (the extended multi-account position path isn't implemented).
+const SINGLE_POSITION_BIN_CAP: i64 = 69;
+
+/// Size bins_below so the downside range covers `target_downside_pct` of price
+/// given the pool's bin_step, clamped to the configured [min, max] and the
+/// single-position cap. A bin moves price by `bin_step` bps, so wider-step
+/// pools need fewer bins for the same coverage — this keeps the range
+/// consistent instead of a flat bin count that exits range fast on tight pools.
+/// Falls back to the configured minimum when bin_step is unknown.
+fn coverage_based_bins_below(bin_step: Option<u32>, cfg: &crate::config::types::StrategyConfig) -> i64 {
+    let max_cap = (cfg.max_bins_below as i64).clamp(1, SINGLE_POSITION_BIN_CAP);
+    let min_floor = (cfg.min_bins_below as i64).clamp(1, max_cap);
+    let Some(step) = bin_step.filter(|s| *s > 0) else {
+        return DEFAULT_BINS_BELOW.clamp(min_floor, max_cap);
+    };
+    let step_frac = step as f64 / 10_000.0;
+    let needed = (cfg.target_downside_pct / step_frac).ceil() as i64;
+    needed.clamp(min_floor, max_cap)
+}
+
 /// Since the Meteora DLMM SDK crate is not available in Rust, this function
 /// builds the transaction data that would be needed for deployment. In the
 /// current implementation, it returns a placeholder indicating what would
@@ -858,23 +879,12 @@ pub async fn deploy_position(
 ) -> Result<DeployResult> {
     let pool_address = crate::tools::wallet::normalize_mint(pool_address);
 
-    let bins_below_val = bins_below.unwrap_or(DEFAULT_BINS_BELOW);
     let bins_above_val = bins_above.unwrap_or(0);
-    let total_bins = bins_below_val + bins_above_val;
     let strategy_str = strategy.unwrap_or("spot");
-    let is_wide_range = total_bins > 69;
 
-    tracing::info!(
-        "deploy_position: pool={} amount_sol={:.4} bins=[{}, {}] strategy={} wide_range={}",
-        &pool_address[..8.min(pool_address.len())],
-        amount_sol,
-        bins_below_val,
-        bins_above_val,
-        strategy_str,
-        is_wide_range,
-    );
-
-    // ─── Fetch active bin and pool info ──────────────────────────
+    // ─── Fetch active bin and pool info first ─────────────────────
+    // The pool's bin_step drives how wide the bin range is, so resolve it
+    // before sizing bins_below.
     let active_bin = get_active_bin(&pool_address)
         .await
         .unwrap_or(ActiveBinInfo {
@@ -883,14 +893,6 @@ pub async fn deploy_position(
             price_per_lamport: None,
         });
 
-    let min_bin_id = active_bin.bin_id - bins_below_val as i32;
-    let max_bin_id = if bins_above_val > 0 {
-        active_bin.bin_id + bins_above_val as i32
-    } else {
-        active_bin.bin_id
-    };
-
-    // Fetch pool metadata for additional info
     let pool_meta = get_pool_metadata(&pool_address).await;
     // Base (non-SOL) token mint from pool metadata. The Meteora API uses
     // snake_case (`token_x`/`token_y`) while PoolMetadata renames to camelCase,
@@ -909,11 +911,47 @@ pub async fn deploy_position(
             .or_else(|| mint_of("token_y").filter(|mint| mint != crate::tools::wallet::SOL_MINT))
             .or_else(|| mint_of("token_x"))
     });
+    // The datapi nests bin_step under `pool_config`; older shapes put it at the
+    // top level. Check both so the range sizing actually sees the real step
+    // instead of silently falling back to a default.
     let bin_step = pool_meta
         .as_ref()
-        .and_then(|m| m.extra.get("bin_step"))
+        .and_then(|m| {
+            m.extra.get("bin_step").or_else(|| {
+                m.extra
+                    .get("pool_config")
+                    .and_then(|pc| pc.get("bin_step"))
+            })
+        })
         .and_then(|v| v.as_u64())
         .map(|v| v as u32);
+
+    // When the caller doesn't pin bins_below, size it from the pool's bin_step
+    // so the downside range covers a consistent fraction of price
+    // (config.strategy.target_downside_pct) instead of a flat bin count that
+    // goes out-of-range fast on tight, low-bin_step pools.
+    let bins_below_val =
+        bins_below.unwrap_or_else(|| coverage_based_bins_below(bin_step, &config.strategy));
+    let total_bins = bins_below_val + bins_above_val;
+    let is_wide_range = total_bins > 69;
+
+    tracing::info!(
+        "deploy_position: pool={} amount_sol={:.4} bins=[{}, {}] bin_step={:?} strategy={} wide_range={}",
+        &pool_address[..8.min(pool_address.len())],
+        amount_sol,
+        bins_below_val,
+        bins_above_val,
+        bin_step,
+        strategy_str,
+        is_wide_range,
+    );
+
+    let min_bin_id = active_bin.bin_id - bins_below_val as i32;
+    let max_bin_id = if bins_above_val > 0 {
+        active_bin.bin_id + bins_above_val as i32
+    } else {
+        active_bin.bin_id
+    };
 
     let base_fee = pool_meta
         .as_ref()
@@ -1263,6 +1301,7 @@ pub async fn search_pools(query: &str, limit: Option<usize>) -> Result<SearchPoo
             bin_step: p
                 .get("bin_step")
                 .or_else(|| p.get("dlmm_params").and_then(|dp| dp.get("bin_step")))
+                .or_else(|| p.get("pool_config").and_then(|pc| pc.get("bin_step")))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as u16),
             fee_pct: p
@@ -1459,6 +1498,31 @@ async fn get_pool_metadata(pool_address: &str) -> Option<PoolMetadata> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coverage_based_bins_scales_with_bin_step() {
+        // min 15, max 50 (capped at 69), target 40% downside.
+        let cfg = crate::config::types::StrategyConfig {
+            min_bins_below: 15,
+            max_bins_below: 50,
+            min_safe_bins_below: 35,
+            target_downside_pct: 0.40,
+        };
+
+        // bin_step 100 (1%): 40% / 1% = 40 bins.
+        assert_eq!(coverage_based_bins_below(Some(100), &cfg), 40);
+        // bin_step 250 (2.5%): 40% / 2.5% = 16 bins.
+        assert_eq!(coverage_based_bins_below(Some(250), &cfg), 16);
+        // bin_step 20 (0.2%): 40% / 0.2% = 200 bins -> clamped to max 50.
+        assert_eq!(coverage_based_bins_below(Some(20), &cfg), 50);
+        // bin_step 1000 (10%): 40% / 10% = 4 bins -> clamped up to min 15.
+        assert_eq!(coverage_based_bins_below(Some(1000), &cfg), 15);
+        // unknown bin_step -> falls back to DEFAULT_BINS_BELOW, clamped.
+        assert_eq!(
+            coverage_based_bins_below(None, &cfg),
+            DEFAULT_BINS_BELOW.clamp(15, 50)
+        );
+    }
 
     struct EnvGuard {
         saved: Vec<(&'static str, Option<String>)>,

@@ -323,6 +323,11 @@ fn config_from_flat_js_value(value: &Value) -> Config {
         "minSafeBinsBelow",
         &mut config.strategy.min_safe_bins_below,
     );
+    set_f64(
+        obj,
+        "targetDownsidePct",
+        &mut config.strategy.target_downside_pct,
+    );
     if config.strategy.max_bins_below < config.strategy.min_bins_below {
         config.strategy.max_bins_below = config.strategy.min_bins_below;
     }
