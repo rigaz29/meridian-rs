@@ -1479,11 +1479,43 @@ pub async fn run_cli_command(
         CliCommand::Close {
             position,
             reason,
-            skip_swap: _,
-        } => json_command_result(
-            "close",
-            close_position(&position, reason.as_deref(), config).await?,
-        ),
+            skip_swap,
+        } => {
+            let mut result = close_position(&position, reason.as_deref(), config).await?;
+            // Unless told to keep the token (e.g. a re-seed strategy), swap any
+            // claimed base-token fees back to SOL. wSOL is already unwrapped by
+            // the close itself, so only a non-SOL base mint needs swapping.
+            const WSOL: &str = "So11111111111111111111111111111111111111112";
+            if !skip_swap {
+                if let Some(base_mint) = result.base_mint.clone() {
+                    if base_mint != WSOL {
+                        let balance =
+                            crate::tools::meteora_native::wallet_token_ui_balance(config, &base_mint)
+                                .await
+                                .unwrap_or(0.0);
+                        if balance > 0.0 {
+                            match swap_token(&base_mint, balance, 50, 100, config).await {
+                                Ok(swap) if swap.success => {
+                                    if let Some(tx) = swap.tx {
+                                        result.txs.get_or_insert_with(Vec::new).push(tx);
+                                    }
+                                }
+                                Ok(swap) => {
+                                    tracing::warn!(
+                                        error = swap.error.as_deref().unwrap_or("unknown"),
+                                        "base-token auto-swap after close did not succeed"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "base-token auto-swap after close failed");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            json_command_result("close", result)
+        }
         CliCommand::Swap { mint, amount } => {
             json_command_result("swap", swap_token(&mint, amount, 50, 100, config).await?)
         }

@@ -1135,7 +1135,9 @@ pub async fn close_position(
                 txs: Some(signatures),
                 pnl_usd: None,
                 pnl_pct: None,
-                base_mint: None,
+                // Surface the pool's base mint so the close caller (executor
+                // auto-swap / CLI) can swap claimed base-token fees back to SOL.
+                base_mint: result.base_mint,
                 error: None,
             })
         }

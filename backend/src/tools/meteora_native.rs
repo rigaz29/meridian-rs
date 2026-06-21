@@ -64,6 +64,10 @@ pub struct NativeClaimResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeCloseResult {
     pub signature: String,
+    /// The pool's base token (token_x) mint, resolved on-chain before the close.
+    /// Lets the caller swap any claimed base-token fees back to SOL. `None` if
+    /// it could not be resolved.
+    pub base_mint: Option<String>,
     /// Signature of the follow-up tx that unwrapped wSOL back to native SOL, if
     /// any wSOL was present after the close. `None` when nothing needed sweeping.
     pub unwrap_signature: Option<String>,
@@ -440,6 +444,51 @@ async fn unwrap_wsol(rpc: &RpcClient, keypair: &Keypair) -> Result<Option<String
     Ok(Some(signature.to_string()))
 }
 
+/// Resolve a position's base mint (the pool's token_x) on-chain. Reads the
+/// position account to get its `lb_pair` (stored as the first field after the
+/// 8-byte discriminator on both `Position` and `PositionV2`), then reads the
+/// pool to get `token_x_mint`.
+async fn resolve_base_mint(rpc: &RpcClient, position: &Pubkey) -> Result<String> {
+    let pos_data = rpc
+        .get_account_data(position)
+        .await
+        .map_err(|e| anyhow!("fetch position account: {}", e))?;
+    if pos_data.len() < 40 {
+        anyhow::bail!("position account too small to contain lb_pair");
+    }
+    let lb_pair = Pubkey::try_from(&pos_data[8..40])
+        .map_err(|_| anyhow!("invalid lb_pair bytes in position account"))?;
+    let pair_data = rpc
+        .get_account_data(&lb_pair)
+        .await
+        .map_err(|e| anyhow!("fetch lb_pair account: {}", e))?;
+    let pair = LbPair::from_bytes(&pair_data).map_err(|e| anyhow!("decode lb_pair: {}", e))?;
+    Ok(pair.token_x_mint.to_string())
+}
+
+/// Sum the wallet's UI balance for a given SPL mint (across all of its token
+/// accounts). Used to decide how much base-token fee to swap back to SOL.
+pub async fn wallet_token_ui_balance(config: &Config, mint: &str) -> Result<f64> {
+    use solana_client_v3::rpc_request::TokenAccountsFilter;
+    let keypair = keypair_from_secret(&wallet_secret_from_env()?)?;
+    let owner = keypair.pubkey();
+    let mint_pk = Pubkey::from_str(mint)?;
+    let rpc = RpcClient::new(resolve_rpc_url(config));
+    let accounts = rpc
+        .get_token_accounts_by_owner(&owner, TokenAccountsFilter::Mint(mint_pk))
+        .await
+        .map_err(|e| anyhow!("list token accounts for {}: {}", mint, e))?;
+    let mut total = 0.0;
+    for acc in &accounts {
+        if let Ok(account) = Pubkey::from_str(&acc.pubkey) {
+            if let Ok(bal) = rpc.get_token_account_balance(&account).await {
+                total += bal.ui_amount.unwrap_or(0.0);
+            }
+        }
+    }
+    Ok(total)
+}
+
 pub async fn close_position(
     position_address: &str,
     config: &Config,
@@ -454,6 +503,17 @@ pub async fn close_position(
     let rpc_url = resolve_rpc_url(config);
     let rpc_client = RpcClient::new(rpc_url);
     let rpc_ctx = RpcContext::confirmed(Arc::new(rpc_client));
+
+    // Resolve the pool's base mint while the position account still exists, so
+    // the caller can swap any claimed base-token fees back to SOL after close.
+    let base_mint = match resolve_base_mint(&rpc_ctx.client, &position).await {
+        Ok(mint) => Some(mint),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not resolve base mint before close (fee auto-swap may be skipped)");
+            None
+        }
+    };
+
     let params = ClosePositionParams {
         position_address: position,
         authority: keypair.pubkey(),
@@ -482,6 +542,7 @@ pub async fn close_position(
 
     Ok(NativeCloseResult {
         signature: result.signature.to_string(),
+        base_mint,
         unwrap_signature,
         remove_liquidity_amount_x: result.quote.remove_liquidity_amount_x,
         remove_liquidity_amount_y: result.quote.remove_liquidity_amount_y,

@@ -229,19 +229,6 @@ pub struct JupiterExecuteRequest {
     pub request_id: String,
 }
 
-/// Jupiter Swap V2 execute response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct JupiterExecuteResponse {
-    pub status: Option<String>,
-    pub signature: Option<String>,
-    pub code: Option<String>,
-    pub input_amount_result: Option<String>,
-    pub output_amount_result: Option<String>,
-    #[serde(flatten)]
-    pub extra: std::collections::HashMap<String, serde_json::Value>,
-}
-
 /// Swap result returned to the LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -501,6 +488,44 @@ pub async fn get_sol_price() -> Result<f64> {
 /// In live mode this loads the wallet keypair from `WALLET_PRIVATE_KEY` or
 /// `MERIDIAN_WALLET_PRIVATE_KEY`, signs Jupiter's base64 versioned transaction
 /// locally in Rust, then submits the signed transaction to Jupiter execute.
+/// Resolve an SPL mint's on-chain decimals via `getTokenSupply`. Returns 9 for
+/// native SOL without a round-trip. Used to size swap input amounts correctly —
+/// guessing the wrong decimals produces an order for the wrong quantity.
+async fn resolve_mint_decimals(
+    client: &reqwest::Client,
+    config: &Config,
+    mint: &str,
+) -> Result<u32> {
+    if mint == SOL_MINT {
+        return Ok(9);
+    }
+    let rpc_url = config
+        .api
+        .helius_rpc_url
+        .as_deref()
+        .unwrap_or("https://api.mainnet-beta.solana.com");
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTokenSupply",
+        "params": [mint],
+    });
+    let value: serde_json::Value = client
+        .post(rpc_url)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| anyhow!("getTokenSupply request failed: {}", e))?
+        .json()
+        .await
+        .map_err(|e| anyhow!("getTokenSupply parse failed: {}", e))?;
+    value["result"]["value"]["decimals"]
+        .as_u64()
+        .map(|d| d as u32)
+        .ok_or_else(|| anyhow!("getTokenSupply returned no decimals for {}", mint))
+}
+
 pub async fn swap_token(
     mint: &str,
     amount: f64,
@@ -529,15 +554,30 @@ pub async fn swap_token(
     let client = reqwest::Client::new();
     let jupiter_api_key = get_jupiter_api_key(config);
 
-    // Convert amount to smallest unit (9 decimals for SOL)
-    let decimals: u32 = 9;
-    let amount_lamports = (amount * 10f64.powi(decimals as i32)).floor() as u64;
-    let amount_str = amount_lamports.to_string();
+    // The Swap V2 `/order` endpoint only builds a signable transaction when the
+    // `taker` (wallet) is supplied; without it the response is a quote-only
+    // payload with no `transaction`, which surfaced as "order returned no
+    // transaction". Load the signing keypair up front so its pubkey can be the
+    // taker, and reuse the same keypair to sign the order below.
+    let keypair = load_keypair_from_env()
+        .map_err(|e| anyhow!("wallet keypair unavailable for swap: {}", e))?;
+    let taker = keypair.pubkey().to_string();
+
+    // Convert the input amount to the token's smallest unit. The INPUT mint is
+    // what's being sold — on a token→SOL swap that's the base token, not SOL —
+    // so its OWN decimals must be used. Hardcoding 9 (SOL) overstated SPL token
+    // amounts (most are 6 decimals) by 1000×, so Jupiter found no route and
+    // returned no transaction. That made every fee-token auto-swap silently fail.
+    let decimals = resolve_mint_decimals(&client, config, &input_mint)
+        .await
+        .map_err(|e| anyhow!("could not resolve decimals for input mint {}: {}", input_mint, e))?;
+    let amount_base_units = (amount * 10f64.powi(decimals as i32)).floor() as u64;
+    let amount_str = amount_base_units.to_string();
 
     // Build order URL
     let mut url = format!(
-        "{}/order?inputMint={}&outputMint={}&amount={}",
-        JUPITER_SWAP_V2_API, input_mint, output_mint, amount_str,
+        "{}/order?inputMint={}&outputMint={}&amount={}&taker={}",
+        JUPITER_SWAP_V2_API, input_mint, output_mint, amount_str, taker,
     );
 
     let referral_params = get_referral_params(config).map(|(account, configured_bps)| {
@@ -614,27 +654,7 @@ pub async fn swap_token(
 
     tracing::info!("swap_token: order received, request_id={}", request_id);
 
-    let keypair = match load_keypair_from_env() {
-        Ok(keypair) => keypair,
-        Err(e) => {
-            return Ok(SwapResult {
-                success: false,
-                tx: None,
-                input_mint: Some(input_mint),
-                output_mint: Some(output_mint),
-                amount_in: Some(amount_str),
-                amount_out: None,
-                referral_account: referral_params.as_ref().map(|(a, _)| a.clone()),
-                referral_fee_bps_requested: referral_params.as_ref().map(|(_, f)| *f),
-                fee_bps_applied: order.fee_bps,
-                error: Some(format!(
-                    "Swap V2 order ready (request_id={}) but wallet keypair is unavailable for Rust signing: {}",
-                    request_id, e
-                )),
-            });
-        }
-    };
-
+    // Keypair was loaded up front (it supplied the taker); reuse it to sign.
     let signed_tx = match sign_transaction_base64(&unsigned_tx, &keypair) {
         Ok(signed_tx) => signed_tx,
         Err(e) => {
@@ -737,12 +757,27 @@ pub async fn execute_swap(
         });
     }
 
-    let result: JupiterExecuteResponse = exec_resp
+    // Parse leniently: Jupiter's /execute response returns `code` and the
+    // amount-result fields as either strings or numbers depending on the
+    // endpoint version. A strict struct decode failed on number-typed fields
+    // and reported an error for a swap that had already landed on-chain, which
+    // could trigger a duplicate retry. Read into a Value and extract defensively.
+    let raw: serde_json::Value = exec_resp
         .json()
         .await
         .map_err(|e| anyhow!("Failed to parse swap V2 execute response: {}", e))?;
 
-    if result.status.as_deref() == Some("Failed") {
+    let str_or_num = |key: &str| -> Option<String> {
+        raw.get(key).and_then(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .or_else(|| (!v.is_null()).then(|| v.to_string()))
+        })
+    };
+    let status = raw.get("status").and_then(|v| v.as_str());
+    let signature = str_or_num("signature");
+
+    if status == Some("Failed") {
         return Ok(SwapResult {
             success: false,
             tx: None,
@@ -755,23 +790,23 @@ pub async fn execute_swap(
             fee_bps_applied: None,
             error: Some(format!(
                 "Swap failed on-chain: code={}",
-                result.code.unwrap_or_default()
+                str_or_num("code").unwrap_or_default()
             )),
         });
     }
 
     tracing::info!(
         "swap execute: SUCCESS tx={}",
-        result.signature.as_deref().unwrap_or("unknown")
+        signature.as_deref().unwrap_or("unknown")
     );
 
     Ok(SwapResult {
         success: true,
-        tx: result.signature,
+        tx: signature,
         input_mint: None,
         output_mint: None,
-        amount_in: result.input_amount_result,
-        amount_out: result.output_amount_result,
+        amount_in: str_or_num("inputAmountResult"),
+        amount_out: str_or_num("outputAmountResult"),
         referral_account: None,
         referral_fee_bps_requested: None,
         fee_bps_applied: None,
