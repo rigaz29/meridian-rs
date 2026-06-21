@@ -622,6 +622,16 @@ h3 { font-size: 15px; }
 /* Last panel in the center/right column grows to fill remaining height, so the
    columns reach the bottom like the sidebar instead of leaving a wallpaper gap. */
 .dash-main > :last-child, .dash-rail > :last-child { flex: 1 1 auto; }
+/* …and pin that stretched panel's footer to its bottom (don't leave it floating
+   mid-card above empty space). */
+.dash-main > .glass-card:last-child,
+.dash-rail > .glass-card:last-child { display: flex; flex-direction: column; }
+.dash-main > .glass-card:last-child > .fees-line,
+.dash-main > .glass-card:last-child > .candidate-footer,
+.dash-main > .glass-card:last-child > .activity-footer,
+.dash-rail > .glass-card:last-child > .fees-line,
+.dash-rail > .glass-card:last-child > .candidate-footer,
+.dash-rail > .glass-card:last-child > .activity-footer { margin-top: auto; }
 /* Make every center/right panel a solid dark card matching the sidebar, so the
    whole dashboard reads as one cohesive app (not glass over the wallpaper). */
 .dash-main > .glass-card,
