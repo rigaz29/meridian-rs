@@ -6,6 +6,7 @@ use solana_sdk_v3::{
 };
 use std::{str::FromStr, sync::Arc};
 use wp_solana_core::token::WorkspacePlanConfig;
+use wp_solana_meteora_dlmm_client::generated::accounts::LbPair;
 use wp_solana_meteora_dlmm_client::generated::types::{StrategyParameters, StrategyType};
 use wp_solana_meteora_dlmm_core::plan::{
     add_liquidity::{AddLiquidityParams, NewPositionConfig},
@@ -81,11 +82,23 @@ pub fn keypair_from_secret(secret: &str) -> Result<Keypair> {
     if trimmed.is_empty() {
         anyhow::bail!("wallet private key is empty");
     }
-    let bytes = if trimmed.starts_with('[') {
-        serde_json::from_str::<Vec<u8>>(trimmed)
+    // Accept a Solana CLI keypair FILE PATH (e.g. id.json) in addition to a raw
+    // base58 / JSON-array secret. Use forward slashes on Windows so the path
+    // survives .env parsing.
+    let source = if !trimmed.starts_with('[') && std::path::Path::new(trimmed).is_file() {
+        std::fs::read_to_string(trimmed)
+            .map_err(|e| anyhow!("failed to read keypair file {}: {}", trimmed, e))?
+            .trim()
+            .to_string()
+    } else {
+        trimmed.to_string()
+    };
+    let source = source.as_str();
+    let bytes = if source.starts_with('[') {
+        serde_json::from_str::<Vec<u8>>(source)
             .map_err(|e| anyhow!("invalid JSON wallet private key: {}", e))?
     } else {
-        bs58::decode(trimmed)
+        bs58::decode(source)
             .into_vec()
             .map_err(|e| anyhow!("invalid base58 wallet private key: {}", e))?
     };
@@ -132,18 +145,23 @@ fn sol_to_lamports(amount_sol: f64) -> Result<u64> {
 }
 
 fn strategy_type_from_name(strategy: &str) -> StrategyType {
+    // AddLiquidityByStrategy2 expects a *Balanced/*ImBalanced strategy type; the
+    // *OneSide variants belong to the dedicated one-side instruction and trigger
+    // InvalidStrategyParameters (0x17a6) here.
     match strategy.to_ascii_lowercase().replace('-', "_").as_str() {
-        "curve" | "curve_one_side" => StrategyType::CurveOneSide,
-        "bid_ask" | "bidask" | "bid_ask_one_side" => StrategyType::BidAskOneSide,
-        _ => StrategyType::SpotOneSide,
+        "curve" | "curve_one_side" | "curve_balanced" => StrategyType::CurveBalanced,
+        "bid_ask" | "bidask" | "bid_ask_one_side" | "bid_ask_balanced" => {
+            StrategyType::BidAskBalanced
+        }
+        _ => StrategyType::SpotBalanced,
     }
 }
 
 fn strategy_name(strategy_type: StrategyType) -> &'static str {
     match strategy_type {
-        StrategyType::CurveOneSide => "curve_one_side",
-        StrategyType::BidAskOneSide => "bid_ask_one_side",
-        _ => "spot_one_side",
+        StrategyType::CurveBalanced => "curve_balanced",
+        StrategyType::BidAskBalanced => "bid_ask_balanced",
+        _ => "spot_balanced",
     }
 }
 
@@ -263,8 +281,31 @@ pub async fn deploy_position(
     let wallet_secret = wallet_secret_from_env()?;
     let keypair = keypair_from_secret(&wallet_secret)?;
     let pool = parse_pubkey("DLMM pool address", pool_address)?;
-    let (min_bin_id, max_bin_id, width) = bin_range(active_id, bins_below, bins_above)?;
     let amount_y = sol_to_lamports(amount_sol)?;
+
+    let rpc_url = resolve_rpc_url(config);
+    let rpc_client = RpcClient::new(rpc_url);
+
+    // The Meteora pool-discovery API does not expose the active bin id, so the
+    // caller's `active_id` is often a placeholder (0). Read the authoritative
+    // active_id straight from the on-chain LbPair account so the strategy bins
+    // and the bin-slippage check match the real pool state — otherwise the tx
+    // is rejected with ExceededBinSlippageTolerance (0x1774).
+    let active_id = match rpc_client.get_account_data(&pool).await {
+        Ok(data) => match LbPair::from_bytes(&data) {
+            Ok(lb_pair) => lb_pair.active_id,
+            Err(e) => {
+                tracing::warn!("failed to decode LbPair {}: {}; using caller active_id", pool, e);
+                active_id
+            }
+        },
+        Err(e) => {
+            tracing::warn!("failed to fetch LbPair {}: {}; using caller active_id", pool, e);
+            active_id
+        }
+    };
+
+    let (min_bin_id, max_bin_id, width) = bin_range(active_id, bins_below, bins_above)?;
     let position_keypair = Keypair::new();
     let position_address = position_keypair.pubkey();
     let params = AddLiquidityParams {
@@ -278,13 +319,12 @@ pub async fn deploy_position(
         amount_x: 0,
         amount_y,
         active_id,
-        max_active_bin_slippage: 1,
+        // Tolerate a few bins of movement between fetch and execution.
+        max_active_bin_slippage: 5,
         strategy_parameters: strategy_parameters(min_bin_id, max_bin_id, strategy),
         authority: keypair.pubkey(),
     };
 
-    let rpc_url = resolve_rpc_url(config);
-    let rpc_client = RpcClient::new(rpc_url);
     let rpc_ctx = RpcContext::confirmed(Arc::new(rpc_client));
     let plan_config = WorkspacePlanConfig::default();
     let result = add_liquidity_one_shot(&rpc_ctx, params, &plan_config, &keypair)
@@ -460,7 +500,7 @@ mod tests {
         assert_eq!(request.min_bin_id, 65);
         assert_eq!(request.max_bin_id, 100);
         assert_eq!(request.width, 36);
-        assert_eq!(request.strategy, "bid_ask_one_side");
+        assert_eq!(request.strategy, "bid_ask_balanced");
         assert_eq!(request.rpc_url, "https://rpc.example.test");
     }
 }
