@@ -373,6 +373,8 @@ async fn main() -> Result<()> {
     let state_path_pnl = state_path.clone();
     let wallet_pnl = wallet_address.clone();
     let mut shutdown_pnl = shutdown_rx.clone();
+    let pnl_pool_memory_path = pool_memory_path.clone();
+    let redeploy_notify_pnl = redeploy_notify.clone();
 
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(pnl_interval);
@@ -401,14 +403,80 @@ async fn main() -> Result<()> {
                             info("pnl_poll", &format!("Exit needed: {} — {}", addr, reason));
                         }
 
-                        let queued = queue_pnl_exit_close_instructions(&mut positions, &exits);
-                        info(
-                            "pnl_poll",
-                            &format!(
-                                "Queued {} close instruction(s) for the guarded management flow",
-                                queued
-                            ),
-                        );
+                        // Execute the closes deterministically here (every 30s)
+                        // instead of only queuing an instruction for the 3-min LLM
+                        // management cycle. The LLM sometimes deferred or skipped
+                        // OOR/SL/TP closes ("candidates for closing but action not
+                        // taken"), leaving capital trapped out of range. Closing
+                        // directly via the executor makes exits prompt and certain;
+                        // close_position also auto-claims fees and swaps to SOL.
+                        match PoolMemoryStore::load(&pnl_pool_memory_path) {
+                            Ok(mut pool_memory) => {
+                                let mut executor =
+                                    crate::tools::executor::ToolExecutor::new(&wallet_pnl);
+                                let mut any_closed = false;
+                                for (addr, reason) in &exits {
+                                    let args = serde_json::json!({
+                                        "position_id": addr,
+                                        "reason": format!("auto-close (pnl_poll): {}", reason),
+                                    });
+                                    let call = crate::llm::ToolCall {
+                                        id: "pnl-auto-close".to_string(),
+                                        call_type: "function".to_string(),
+                                        function: crate::llm::FunctionCall {
+                                            name: "close_position".to_string(),
+                                            arguments: args.to_string(),
+                                        },
+                                    };
+                                    let (out, is_err) = executor
+                                        .execute(
+                                            &call,
+                                            &config_pnl,
+                                            &mut positions,
+                                            &mut pool_memory,
+                                        )
+                                        .await;
+                                    if is_err {
+                                        warn(
+                                            "pnl_poll",
+                                            &format!(
+                                                "auto-close {} failed (will retry next poll): {}",
+                                                addr,
+                                                &out[..out.len().min(160)]
+                                            ),
+                                        );
+                                    } else {
+                                        info(
+                                            "pnl_poll",
+                                            &format!("auto-closed {} — {}", addr, reason),
+                                        );
+                                        any_closed = true;
+                                    }
+                                }
+                                let _ = pool_memory.save(&pnl_pool_memory_path);
+                                if any_closed {
+                                    // Freed a slot → wake screening to redeploy now.
+                                    redeploy_notify_pnl.notify_one();
+                                }
+                            }
+                            Err(e) => {
+                                // Fall back to the queued LLM flow if pool memory
+                                // can't be loaded, so exits still get handled.
+                                warn(
+                                    "pnl_poll",
+                                    &format!(
+                                        "pool memory load failed ({}), queuing closes instead",
+                                        e
+                                    ),
+                                );
+                                let queued =
+                                    queue_pnl_exit_close_instructions(&mut positions, &exits);
+                                info(
+                                    "pnl_poll",
+                                    &format!("Queued {} close instruction(s)", queued),
+                                );
+                            }
+                        }
                     }
 
                     // Persist on EVERY poll, not just when an exit is queued —
