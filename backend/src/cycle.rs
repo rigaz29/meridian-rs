@@ -386,6 +386,7 @@ pub async fn run_pnl_poll(
         let mut pnl_pct: Option<f64> = None;
         let mut fee_tvl: Option<f64> = None;
         let mut active_bin = 0i32;
+        let mut pnl_in_range: Option<bool> = None;
 
         // Fetch real PnL
         if let Ok(pnl_result) =
@@ -393,6 +394,8 @@ pub async fn run_pnl_poll(
         {
             pnl_pct = pnl_result.pnl_pct;
             fee_tvl = pnl_result.fee_per_tvl_24h;
+            // Authoritative in-range flag from the API (isOutOfRange).
+            pnl_in_range = pnl_result.in_range;
             // Also try to get active_bin from PnL response
             if let Some(ab) = pnl_result.active_bin {
                 active_bin = ab;
@@ -404,7 +407,10 @@ pub async fn run_pnl_poll(
             active_bin = bin_result.bin_id;
         }
 
-        let in_range = active_bin >= p.lower_bin && active_bin <= p.upper_bin;
+        // Prefer the API's isOutOfRange flag; fall back to a bin comparison only
+        // when it's unavailable. (The stored bins are relative and active_bin is
+        // unreliable here, so the manual comparison alone mis-reported in-range.)
+        let in_range = pnl_in_range.unwrap_or(active_bin >= p.lower_bin && active_bin <= p.upper_bin);
 
         pos_data.push(PnlPollSnapshot {
             id: p.id.clone(),

@@ -700,9 +700,12 @@ pub fn get_deterministic_close_rule(
     }
 
     // ── Rule 4: Out of Range Too Long ────────────────────────────
-    if active_bin > pos.upper_bin
-        && minutes_out_of_range >= config.management.out_of_range_wait_minutes
-    {
+    // out_of_range_since (hence minutes_out_of_range) is only set while the
+    // position is actually OOR per the live on-chain flag, so the timer alone is
+    // the reliable trigger. The old `active_bin > upper_bin` guard was broken:
+    // stored bins are relative while the live active_bin is absolute/placeholder,
+    // so it never matched and OOR positions were never closed.
+    if minutes_out_of_range >= config.management.out_of_range_wait_minutes {
         return Some(CloseRule::OutOfRange);
     }
 
