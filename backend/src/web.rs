@@ -817,10 +817,23 @@ async fn get_portfolio(State(state): State<WebAppState>) -> Json<Value> {
         }
     }
 
+    // Fetch each pool's history concurrently — sequential awaits made this
+    // endpoint take ~1.4s × N pools (≈17s for 12 pools), which left the
+    // dashboard "Historical" panel stuck on "Loading history…". JoinSet runs
+    // all pool fetches in parallel so total latency ≈ the slowest single fetch.
     let mut histories = Vec::new();
     if !wallet.is_empty() {
+        let mut set = tokio::task::JoinSet::new();
         for (pool, name) in &pools {
-            if let Some(h) = crate::tools::dlmm::get_pool_history(pool, name, &wallet).await {
+            let pool = pool.clone();
+            let name = name.clone();
+            let wallet = wallet.clone();
+            set.spawn(async move {
+                crate::tools::dlmm::get_pool_history(&pool, &name, &wallet).await
+            });
+        }
+        while let Some(res) = set.join_next().await {
+            if let Ok(Some(h)) = res {
                 histories.push(h);
             }
         }
