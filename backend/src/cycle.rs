@@ -542,12 +542,12 @@ fn build_screening_goal(
         // Fill every open slot in a single cycle so capital isn't left idle
         // waiting for the next tick (important for fast fee-printing rotation).
         format!(
-            "Screen Meteora DLMM pools and fill up to {} open position slots, deploying {:.4} SOL to EACH of the best {} DISTINCT candidates (different pools and different base tokens).          Active positions: {}. Max: {}.          Use get_top_candidates, then call deploy_position once per candidate with amount_y={:.4} until all {} slots are filled or no more candidates pass.          Deploy ONLY candidates that pass ALL thresholds — never the same pool or token twice.",
+            "Screen Meteora DLMM pools and fill up to {} open position slots, deploying {:.4} SOL to EACH of the best {} DISTINCT candidates (different pools and different base tokens).          Active positions: {}. Max: {}.          BE FAST: call get_top_candidates ONCE, then immediately call deploy_position once per candidate with amount_y={:.4} until all {} slots are filled or no more candidates pass. The candidates already passed every screening filter — do NOT do extra per-token research or analysis.          Deploy ONLY candidates that pass ALL thresholds — never the same pool or token twice.",
             slots, deploy_amount, slots, active_count, config.risk.max_positions, deploy_amount, slots,
         )
     } else {
         format!(
-            "Screen Meteora DLMM pools and deploy {:.4} SOL to the best candidate.          Active positions: {}. Max: {}.          Use get_top_candidates, then call deploy_position with amount_y={:.4}.          Deploy ONLY if a candidate passes ALL thresholds.",
+            "Screen Meteora DLMM pools and deploy {:.4} SOL to the best candidate.          Active positions: {}. Max: {}.          BE FAST: call get_top_candidates ONCE, then immediately call deploy_position with amount_y={:.4}. The candidates already passed every screening filter — do NOT do extra per-token research or analysis.          Deploy ONLY if a candidate passes ALL thresholds.",
             deploy_amount, active_count, config.risk.max_positions, deploy_amount,
         )
     };
