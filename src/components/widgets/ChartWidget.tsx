@@ -72,7 +72,7 @@ export const ChartWidget = ({ slot, index }: { slot: ChartSlot | null; index: nu
   }, [slot?.mint]);
 
   const view = useMemo(() => {
-    const last = candles.slice(-80);
+    const last = candles.slice(-56);
     if (last.length < 2) return null;
     const closes = candles.map((c) => c.close);
     const offset = candles.length - last.length;
@@ -157,28 +157,21 @@ export const ChartWidget = ({ slot, index }: { slot: ChartSlot | null; index: nu
 
       {view ? (
         <svg className="chart-svg" viewBox={`0 0 ${view.W} ${view.H}`} preserveAspectRatio="none">
-          {/* Bollinger band fill */}
-          <polygon
-            className="bb-fill"
-            points={`${view.line('upper')} ${view.bands
-              .map((b, i) => (b ? `${view.x(i).toFixed(1)},${view.y(b.lower).toFixed(1)}` : null))
-              .filter(Boolean)
-              .reverse()
-              .join(' ')}`}
-          />
           <polyline className="bb-upper" points={view.line('upper')} fill="none" />
           <polyline className="bb-mid" points={view.line('mid')} fill="none" />
           <polyline className="bb-lower" points={view.line('lower')} fill="none" />
-          {/* Fibonacci retracement levels */}
+          {/* Fibonacci retracement — golden zone (.382/.5/.618) emphasised */}
           {view.fib.map((f) => {
             const yy = view.y(f.price);
-            const key = f.r === 0 || f.r === 1 || f.r === 0.5;
+            const key = f.r === 0.382 || f.r === 0.5 || f.r === 0.618;
             return (
               <g key={f.r} className={`fib ${key ? 'key' : ''}`}>
                 <line x1={view.padX} x2={view.W - view.padX} y1={yy} y2={yy} className="fib-line" />
-                <text x={view.W - view.padX - 2} y={yy - 1.5} className="fib-label" textAnchor="end">
-                  {f.r.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')}
-                </text>
+                {key ? (
+                  <text x={view.W - view.padX - 2} y={yy - 1.5} className="fib-label" textAnchor="end">
+                    {f.r.toFixed(3).replace(/0+$/, '').replace(/\.$/, '')}
+                  </text>
+                ) : null}
               </g>
             );
           })}
