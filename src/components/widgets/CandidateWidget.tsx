@@ -29,19 +29,47 @@ const formatCompact = (value?: number) => {
 const proxiedIcon = (url?: string | null) =>
   url ? `https://wsrv.nl/?url=${encodeURIComponent(url)}&w=32&h=32&fit=cover&output=webp` : null;
 
-const TokenLogo = ({ src, alt }: { src: string | null; alt: string }) => {
-  const [errored, setErrored] = useState(false);
-  if (!src || errored) {
-    return <i style={{ width: 16, height: 16, borderRadius: '50%', flexShrink: 0, background: 'linear-gradient(135deg,#2dd4bf,#8b5cf6)', display: 'inline-block' }} />;
+// DexScreener resolves a token image directly from its mint — a reliable
+// fallback when the candidate payload has no icon URL of its own.
+const tokenIconUrl = (mint?: string | null) =>
+  mint ? `https://dd.dexscreener.com/ds-data/tokens/solana/${mint}.png?size=lg` : null;
+
+// Ordered logo sources: provided icon first, then DexScreener-by-mint as a
+// fallback. TokenLogo advances through them on load error, then to a letter.
+const logoSrcs = (icon?: string | null, mint?: string | null) =>
+  [proxiedIcon(icon && icon.trim()), proxiedIcon(tokenIconUrl(mint))].filter(Boolean) as string[];
+
+// A short label for the lettered fallback avatar.
+const letterFor = (symbol?: string | null, name?: string | null) =>
+  ((symbol && symbol.trim()) || (name ?? '').split(/[-/ ]/)[0] || '?').slice(0, 1).toUpperCase();
+
+const TokenLogo = ({ srcs, symbol, name }: { srcs: string[]; symbol?: string | null; name?: string | null }) => {
+  const [idx, setIdx] = useState(0);
+  const src = srcs[idx];
+  if (!src) {
+    // Lettered avatar instead of a blank gradient so the token is still
+    // identifiable when no image resolves.
+    return (
+      <i
+        style={{
+          width: 16, height: 16, borderRadius: '50%', flexShrink: 0,
+          background: 'linear-gradient(135deg,#2dd4bf,#8b5cf6)',
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 8, fontWeight: 800, color: '#06121b', lineHeight: 1,
+        }}
+      >
+        {letterFor(symbol, name)}
+      </i>
+    );
   }
   return (
     <img
       src={src}
-      alt={alt}
+      alt={symbol ?? name ?? ''}
       width={16}
       height={16}
       loading="lazy"
-      onError={() => setErrored(true)}
+      onError={() => setIdx((i) => i + 1)}
       style={{ width: 16, height: 16, borderRadius: '50%', objectFit: 'cover', flexShrink: 0 }}
     />
   );
@@ -89,7 +117,7 @@ export const CandidateWidget = () => {
         {candidates.length ? candidates.map((candidate) => (
           <div className="candidate-row" key={candidate.pool_address ?? candidate.name}>
             <div className="cand-pair">
-              <TokenLogo src={proxiedIcon(candidate.base?.icon)} alt={candidate.base?.symbol ?? candidate.name ?? ''} />
+              <TokenLogo srcs={logoSrcs(candidate.base?.icon, candidate.base?.mint)} symbol={candidate.base?.symbol} name={candidate.name} />
               <div className="cand-pair-text">
                 <strong>{candidate.name ?? 'UNKNOWN'}</strong>
                 <small>{candidate.pool_address ? `${candidate.pool_address.slice(0, 4)}…${candidate.pool_address.slice(-4)}` : '-'}</small>
