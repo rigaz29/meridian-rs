@@ -454,6 +454,11 @@ pub struct IndicatorsConfig {
     pub rsi_overbought: f64,
     #[serde(default)]
     pub require_all_intervals: bool,
+    /// Bollinger %B entry gate: only deploy when the latest 5m %B is >= this
+    /// (price over-extended up → mean-reversion pullback into our below-range LP
+    /// is more likely). Active only when `enabled` is true.
+    #[serde(default = "default_indicator_bb_percent_b_min")]
+    pub bb_percent_b_min: f64,
 }
 
 impl Default for IndicatorsConfig {
@@ -469,6 +474,7 @@ impl Default for IndicatorsConfig {
             rsi_oversold: default_indicator_rsi_oversold(),
             rsi_overbought: default_indicator_rsi_overbought(),
             require_all_intervals: false,
+            bb_percent_b_min: default_indicator_bb_percent_b_min(),
         }
     }
 }
@@ -487,6 +493,9 @@ fn default_indicator_rsi_oversold() -> f64 {
 }
 fn default_indicator_rsi_overbought() -> f64 {
     80.0
+}
+fn default_indicator_bb_percent_b_min() -> f64 {
+    0.8
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

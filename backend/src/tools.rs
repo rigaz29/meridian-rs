@@ -1,5 +1,6 @@
 pub mod agent_meridian;
 pub mod blacklist;
+pub mod bollinger;
 pub mod chart_indicators;
 pub mod definitions;
 pub mod discord_signals;

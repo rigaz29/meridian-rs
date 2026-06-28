@@ -374,6 +374,11 @@ fn config_from_flat_js_value(value: &Value) -> Config {
             "requireAllIntervals",
             &mut config.indicators.require_all_intervals,
         );
+        set_f64(
+            indicators,
+            "bbPercentBMin",
+            &mut config.indicators.bb_percent_b_min,
+        );
 
         let mut presets = Vec::new();
         if let Some(entry) = config.indicators.entry_preset.clone() {

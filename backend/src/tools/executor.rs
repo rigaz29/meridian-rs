@@ -595,6 +595,45 @@ impl ToolExecutor {
                     anyhow::bail!("could not verify pool before deploy");
                 }
 
+                // Bollinger %B entry-timing gate (mean reversion). We deploy SOL
+                // below the active price and only earn when price pulls back DOWN
+                // into our range, so only enter when price is over-extended up
+                // (%B >= threshold). Deploying regardless of price position was a
+                // major bleed source. On data error we allow the deploy (don't
+                // block trading on a transient indicator-API hiccup).
+                if config.indicators.enabled {
+                    if let Some(base_mint) =
+                        args["base_mint"].as_str().filter(|m| !m.is_empty())
+                    {
+                        match crate::tools::bollinger::entry_percent_b(config, base_mint).await {
+                            Ok(Some(pb)) => {
+                                if pb < config.indicators.bb_percent_b_min {
+                                    anyhow::bail!(
+                                        "BB %B {:.2} < entry min {:.2} — price not over-extended, waiting for mean-reversion setup",
+                                        pb,
+                                        config.indicators.bb_percent_b_min
+                                    );
+                                }
+                                info(
+                                    "executor",
+                                    &format!(
+                                        "BB %B {:.2} >= {:.2} — over-extended, pullback setup OK",
+                                        pb, config.indicators.bb_percent_b_min
+                                    ),
+                                );
+                            }
+                            Ok(None) => info(
+                                "executor",
+                                "BB %B unavailable (insufficient candles) — allowing deploy",
+                            ),
+                            Err(e) => info(
+                                "executor",
+                                &format!("BB %B check skipped (error): {}", e),
+                            ),
+                        }
+                    }
+                }
+
                 // On-chain dedup guard (LAST check — smallest race window).
                 // The tracked-state checks above can be bypassed if two screening
                 // cycles overlap (deploy #1 not yet saved when deploy #2 validates).
