@@ -228,7 +228,7 @@ const mapPosition = (position: BackendPosition, pricing: PricingContext): Positi
     : (liquidityUsd > 0 ? (feesUsd / liquidityUsd) * 100 : 0);
 
   return {
-    key: position.id ?? position.pool_name ?? Math.random().toString(36),
+    key: position.id ?? position.pool_address ?? position.base_mint ?? position.pool_name ?? 'position',
     pair: symbol,
     range: liveRange ?? rangeFromSnapshot(position) ?? formatRange(position.lower_bin, position.upper_bin, tokenUsd, solUsd),
     quote: `SOL per ${symbol}`,
