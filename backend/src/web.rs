@@ -627,33 +627,37 @@ async fn enrich_position_state(payload: &mut Value, config: &Config) {
             .and_then(Value::as_str)
             .map(str::to_string);
 
-        // ── Live liquidity + claimable fees (on-chain read-only quote) ──
-        let quote = crate::tools::meteora_native::quote_position_state(&id, config)
-            .await
-            .ok();
+        // Run this position's independent network reads concurrently — quote
+        // (on-chain liquidity/fees), PnL (Meteora API), and icon. Doing them
+        // sequentially made /api/positions take 3–8s for a few positions.
+        let pnl_fut = async {
+            match &pool_address {
+                Some(pool) if !wallet.is_empty() => {
+                    crate::tools::dlmm::get_position_pnl(pool, &id, &wallet).await.ok()
+                }
+                _ => None,
+            }
+        };
+        let icon_fut = async {
+            match &base_mint {
+                Some(mint) if mint != crate::tools::wallet::SOL_MINT => {
+                    crate::tools::dlmm::get_token_icon(mint).await
+                }
+                _ => None,
+            }
+        };
+        let (quote, pnl, base_icon) = tokio::join!(
+            crate::tools::meteora_native::quote_position_state(&id, config),
+            pnl_fut,
+            icon_fut,
+        );
+        let quote = quote.ok();
+        // Token decimals depend on the quote, so resolve after it.
         let token_decimals = match (&base_mint, &quote) {
             (Some(mint), Some(q)) if q.liquidity_x > 0 || q.fee_x > 0 => {
                 crate::tools::wallet::resolve_mint_decimals(&http, config, mint)
                     .await
                     .ok()
-            }
-            _ => None,
-        };
-
-        // ── Live PnL (Meteora API: accounts for deposits, IL and fees) ──
-        let pnl = match &pool_address {
-            Some(pool) if !wallet.is_empty() => {
-                crate::tools::dlmm::get_position_pnl(pool, &id, &wallet)
-                    .await
-                    .ok()
-            }
-            _ => None,
-        };
-
-        // ── Base-token icon (same IPFS image Meteora shows) ──
-        let base_icon = match &base_mint {
-            Some(mint) if mint != crate::tools::wallet::SOL_MINT => {
-                crate::tools::dlmm::get_token_icon(mint).await
             }
             _ => None,
         };

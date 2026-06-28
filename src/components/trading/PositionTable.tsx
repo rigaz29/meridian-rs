@@ -73,6 +73,12 @@ type PositionRow = {
 
 const fallbackPositions: PositionRow[] = [];
 
+// Module-level cache of the last successfully-loaded rows. Survives component
+// remounts (switching tabs/widgets) so the panel shows the last-known positions
+// instantly instead of flashing "0 positions" while the slow /positions enrich
+// refetch (3–8s) runs, and so a transient fetch error doesn't blank it.
+let cachedPositionRows: PositionRow[] = [];
+
 const formatAge = (createdAt?: string) => {
   if (!createdAt) return '-';
   const created = new Date(createdAt).getTime();
@@ -250,7 +256,7 @@ const mapPosition = (position: BackendPosition, pricing: PricingContext): Positi
 };
 
 export const PositionTable = () => {
-  const [positions, setPositions] = useState<PositionRow[]>(fallbackPositions);
+  const [positions, setPositions] = useState<PositionRow[]>(cachedPositionRows);
 
   useEffect(() => {
     let isMounted = true;
@@ -285,12 +291,19 @@ export const PositionTable = () => {
           tokenPrices: prices?.tokenPrices ?? {},
           mintByPool,
         };
-        const nextPositions = Array.isArray(payload?.data?.positions)
-          ? openPositions.map((position) => mapPosition(position, pricing))
-          : fallbackPositions;
-        if (isMounted) setPositions(nextPositions);
+        // Only update from an authoritative response (positions array present).
+        // A successful empty array IS valid (all positions closed) and will
+        // clear the panel; a malformed/missing payload keeps the last-good rows.
+        if (Array.isArray(payload?.data?.positions)) {
+          const nextPositions = openPositions.map((position) => mapPosition(position, pricing));
+          cachedPositionRows = nextPositions;
+          if (isMounted) setPositions(nextPositions);
+        } else if (isMounted) {
+          setPositions(cachedPositionRows);
+        }
       } catch {
-        if (isMounted) setPositions(fallbackPositions);
+        // Transient fetch error — keep the last-known positions, don't blank.
+        if (isMounted) setPositions(cachedPositionRows);
       }
     };
 
