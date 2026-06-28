@@ -256,7 +256,7 @@ export const ChartWidget = ({ slot, index }: { slot: ChartSlot | null; index: nu
       ) : (
         <div className="chart-empty">
           {status === 'loading' && 'Loading chart…'}
-          {status === 'empty' && `Waiting for position ${index + 1}…`}
+          {status === 'empty' && `No open position · slot ${index + 1}`}
           {status === 'error' && 'Chart data unavailable'}
           {status === 'idle' && '—'}
           {status === 'ok' && 'Not enough candles'}
