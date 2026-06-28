@@ -57,7 +57,7 @@ impl AgentLoop {
             &format!(
                 "Agent loop starting — role={}, goal={}",
                 role.as_str(),
-                &goal[..goal.len().min(80)]
+                goal.chars().take(80).collect::<String>()
             ),
         );
 
@@ -180,7 +180,7 @@ impl AgentLoop {
                     &format!(
                         "Tool call: {}({})",
                         tc.function.name,
-                        &tc.function.arguments[..tc.function.arguments.len().min(100)]
+                        tc.function.arguments.chars().take(100).collect::<String>()
                     ),
                 );
 
@@ -191,7 +191,7 @@ impl AgentLoop {
                     &format!(
                         "Tool result [{}]: {}",
                         if is_error { "ERR" } else { "OK" },
-                        &result[..result.len().min(200)]
+                        result.chars().take(200).collect::<String>()
                     ),
                 );
 

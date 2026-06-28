@@ -361,7 +361,7 @@ pub async fn run_management_cycle(
 
     info(
         "cycle",
-        &format!("Management result: {}", &result[..result.len().min(300)]),
+        &format!("Management result: {}", result.chars().take(300).collect::<String>()),
     );
     Ok(result)
 }
@@ -631,7 +631,7 @@ pub async fn run_screening_cycle(
 
     info(
         "cycle",
-        &format!("Screening result: {}", &result[..result.len().min(300)]),
+        &format!("Screening result: {}", result.chars().take(300).collect::<String>()),
     );
     Ok(result)
 }

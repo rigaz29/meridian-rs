@@ -38,7 +38,7 @@ async fn cli_exec(args: &[&str]) -> Result<serde_json::Value> {
         anyhow!(
             "Failed to parse CLI JSON output: {} — stdout: {}",
             e,
-            &stdout[..stdout.len().min(200)]
+            stdout.chars().take(200).collect::<String>()
         )
     })
 }

@@ -442,7 +442,7 @@ async fn main() -> Result<()> {
                                             &format!(
                                                 "auto-close {} failed (will retry next poll): {}",
                                                 addr,
-                                                &out[..out.len().min(160)]
+                                                out.chars().take(160).collect::<String>()
                                             ),
                                         );
                                     } else {
@@ -556,7 +556,7 @@ async fn main() -> Result<()> {
                         "mgmt",
                         &format!(
                             "Management cycle complete: {}",
-                            &result[..result.len().min(200)]
+                            result.chars().take(200).collect::<String>()
                         ),
                     );
                     if let Err(e) = positions.save(&mgmt_state_path) {
@@ -651,7 +651,7 @@ async fn main() -> Result<()> {
                         "screen",
                         &format!(
                             "Screening cycle complete: {}",
-                            &result[..result.len().min(200)]
+                            result.chars().take(200).collect::<String>()
                         ),
                     );
                 }
