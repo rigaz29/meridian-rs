@@ -19,6 +19,7 @@ const getProvider = (): PhantomProvider | null => {
 };
 
 export const LockScreen = ({ onAuthed }: { onAuthed: (pubkey: string) => void }) => {
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [pwStatus, setPwStatus] = useState<'idle' | 'verifying'>('idle');
   const [showWallet, setShowWallet] = useState(false);
@@ -26,18 +27,18 @@ export const LockScreen = ({ onAuthed }: { onAuthed: (pubkey: string) => void })
   const [error, setError] = useState('');
 
   const loginPassword = async () => {
-    if (!password || pwStatus === 'verifying') return;
+    if (!username || !password || pwStatus === 'verifying') return;
     setError('');
     setPwStatus('verifying');
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({ username, password }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error ?? 'login failed');
-      onAuthed('password');
+      onAuthed(username);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'login failed');
       setPwStatus('idle');
@@ -101,15 +102,25 @@ export const LockScreen = ({ onAuthed }: { onAuthed: (pubkey: string) => void })
           onSubmit={(e) => { e.preventDefault(); loginPassword(); }}
         >
           <input
+            type="text"
+            className="lock-input"
+            placeholder="Username"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            autoFocus
+            autoComplete="username"
+            autoCapitalize="none"
+            spellCheck={false}
+          />
+          <input
             type="password"
             className="lock-input"
             placeholder="Password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            autoFocus
             autoComplete="current-password"
           />
-          <button type="submit" className="lock-btn" disabled={!password || pwStatus === 'verifying'}>
+          <button type="submit" className="lock-btn" disabled={!username || !password || pwStatus === 'verifying'}>
             {pwStatus === 'verifying' ? <Lock size={16} /> : <KeyRound size={16} />}
             {pwStatus === 'verifying' ? 'Unlocking…' : 'Unlock'}
           </button>

@@ -81,16 +81,35 @@ export const isAllowed = (pubkey: string): boolean => {
 // AUTH_PASSWORD is unset, password login is disabled (returns false).
 export const passwordLoginEnabled = (): boolean => Boolean(process.env.AUTH_PASSWORD);
 
-export const checkPassword = (input: string): boolean => {
-  const expected = process.env.AUTH_PASSWORD || '';
+// Constant-time string compare (always scans the longer length, folds in any
+// length mismatch) to avoid leaking via timing.
+const constantTimeEq = (input: string, expected: string): boolean => {
   if (!expected || !input) return false;
   const a = enc.encode(input);
   const b = enc.encode(expected);
-  // constant-time-ish: always compare same length, fold in length mismatch
   let diff = a.length ^ b.length;
   const max = Math.max(a.length, b.length);
   for (let i = 0; i < max; i += 1) diff |= (a[i] ?? 0) ^ (b[i] ?? 0);
   return diff === 0;
+};
+
+export const checkPassword = (input: string): boolean =>
+  constantTimeEq(input, process.env.AUTH_PASSWORD || '');
+
+// Username check. If AUTH_USERNAME is unset, the username isn't required
+// (back-compat with password-only deployments).
+export const checkUsername = (input: string): boolean => {
+  const expected = process.env.AUTH_USERNAME || '';
+  if (!expected) return true;
+  return constantTimeEq(input, expected);
+};
+
+// Verify both, computing each side regardless so the "which field was wrong"
+// isn't leaked by short-circuit timing.
+export const checkLogin = (username: string, password: string): boolean => {
+  const okUser = checkUsername(username);
+  const okPass = checkPassword(password);
+  return okUser && okPass;
 };
 
 // Human-readable message the wallet signs (includes the nonce).

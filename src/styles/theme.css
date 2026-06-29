@@ -1022,6 +1022,22 @@ h3 { font-size: 15px; }
 .backend-status-strip { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 18px; padding: 13px 15px; border: 1px solid rgba(85, 223, 134, 0.22); border-radius: 12px; background: rgba(7, 15, 28, 0.62); }
 .backend-status-strip b { color: #e8edf8; font-size: 22px; letter-spacing: -0.03em; }
 .backend-status-strip span { color: var(--green); font-family: var(--font-mono); font-size: 12px; font-weight: 900; letter-spacing: .1em; }
+/* Agent control (start/stop) */
+.agent-state { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; padding: 13px 15px; border: 1px solid rgba(168, 181, 211, 0.16); border-radius: 12px; background: rgba(7, 15, 28, 0.62); }
+.agent-dot { width: 11px; height: 11px; border-radius: 50%; flex: 0 0 auto; }
+.agent-dot.on { background: var(--green); box-shadow: 0 0 14px rgba(85, 223, 134, 0.7); }
+.agent-dot.off { background: #ff6676; box-shadow: 0 0 14px rgba(255, 102, 118, 0.55); }
+.agent-state b { color: #e8edf8; font-family: var(--font-mono); font-size: 14px; font-weight: 900; letter-spacing: .08em; }
+.agent-state .agent-sub { margin-left: auto; color: #7f8aa1; font-family: var(--font-mono); font-size: 11px; }
+.agent-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 14px; }
+.agent-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 10px 8px; border-radius: 10px; cursor: pointer; border: 1px solid var(--line); background: rgba(255,255,255,0.04); color: #d7deed; font: 800 12px var(--font-sans); transition: background .15s, border-color .15s, color .15s, opacity .15s; }
+.agent-btn:hover:not(:disabled) { background: rgba(255,255,255,0.08); }
+.agent-btn.start { border-color: rgba(85, 223, 134, 0.4); color: #b8ffce; background: rgba(85, 223, 134, 0.1); }
+.agent-btn.start:hover:not(:disabled) { background: rgba(85, 223, 134, 0.18); }
+.agent-btn.stop { border-color: rgba(255, 102, 118, 0.4); color: #ffc2cb; background: rgba(255, 102, 118, 0.1); }
+.agent-btn.stop:hover:not(:disabled) { background: rgba(255, 102, 118, 0.18); }
+.agent-btn:disabled { opacity: .4; cursor: default; }
+
 .backend-grid-two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .backend-grid-two.compact { margin-top: 14px; }
 .backend-kv { min-width: 0; padding: 12px; border: 1px solid rgba(168, 181, 211, 0.14); border-radius: 12px; background: rgba(4, 10, 20, 0.42); }

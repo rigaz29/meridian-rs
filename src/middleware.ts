@@ -14,6 +14,7 @@ export async function middleware(request: NextRequest) {
 export const config = {
   matcher: [
     '/api/meridian/:path*',
+    '/api/agent/:path*',
     '/api/chart/:path*',
     '/api/prices',
     '/api/system',
