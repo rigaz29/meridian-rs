@@ -401,17 +401,17 @@ export const PositionTable = () => {
                 <div className="mp-spark"><span /></div>
               )}
             </div>
-            <div className="mp-stack">
+            <div className="mp-stack" data-label="Your Liquidity">
               <div className="mp-main">{position.liquidityUsd}</div>
               <div className="mp-token"><TokenLogo srcs={position.baseIconSrcs} alt={position.pair} /><span>{position.liquiditySecondary}</span></div>
               <div className="mp-token"><TokenLogo srcs={SOL_ICON ? [SOL_ICON] : []} alt="SOL" /><span>{position.liquidityPrimary}</span></div>
             </div>
-            <div className="mp-stack">
+            <div className="mp-stack" data-label="Claimable Fees">
               <div className="mp-main mp-fees-main">{position.feesUsd}<em>{position.feesApr}</em></div>
               <div className="mp-token"><TokenLogo srcs={position.baseIconSrcs} alt={position.pair} /><span>{position.feesSecondary}</span></div>
               <div className="mp-token"><TokenLogo srcs={SOL_ICON ? [SOL_ICON] : []} alt="SOL" /><span>{position.feesPrimary}</span></div>
             </div>
-            <div className={position.pnlPositive ? 'mp-pnl mp-up' : 'mp-pnl mp-down'}>
+            <div className={position.pnlPositive ? 'mp-pnl mp-up' : 'mp-pnl mp-down'} data-label="PnL">
               <div>{position.pnlUsd}</div>
               <span>{position.pnlPct}</span>
             </div>

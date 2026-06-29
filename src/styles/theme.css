@@ -1129,8 +1129,18 @@ h3 { font-size: 15px; }
   .position-head { display: none; }
   .position-row { grid-template-columns: 1fr; gap: 10px; padding: 18px 0; }
   .live-position-row { grid-template-columns: 1fr; padding: 16px; }
-  .meteora-position-row { grid-template-columns: 1fr; gap: 14px; padding: 16px; }
-  .mp-actions { justify-content: flex-start; }
+  /* Stacked position card: label each metric (desktop has column headers; mobile
+     hides them, so values were ambiguous). Buttons go full-width side-by-side. */
+  .meteora-position-row { grid-template-columns: 1fr; gap: 16px; padding: 16px; border: 1px solid var(--line); border-radius: 14px; background: rgba(10, 14, 22, 0.5); }
+  .meteora-position-row [data-label]::before {
+    content: attr(data-label);
+    display: block; margin-bottom: 5px;
+    color: var(--dim); font-family: var(--font-mono); font-size: 10px; font-weight: 800;
+    letter-spacing: .1em; text-transform: uppercase;
+  }
+  .mp-pnl[data-label] { align-items: flex-start; }
+  .mp-actions { flex-direction: row !important; align-items: stretch !important; gap: 10px !important; }
+  .mp-actions button { flex: 1; }
   .actions-cell { justify-content: flex-start; }
   .weather-main,
   .player-row,
