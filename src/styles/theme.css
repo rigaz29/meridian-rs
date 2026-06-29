@@ -545,7 +545,7 @@ h3 { font-size: 15px; }
   border-left: 1px solid rgba(168, 181, 211, 0.22);
 }
 .portfolio-summary .ps-stat:first-child { border-left: 0; padding-left: 0; }
-.portfolio-summary .ps-stat span { color: #8e98ad; font-size: 12px; font-weight: 560; letter-spacing: -0.01em; }
+.portfolio-summary .ps-stat span { color: #8e98ad; font-size: 12px; font-weight: 560; letter-spacing: -0.01em; white-space: nowrap; }
 .portfolio-summary .ps-stat b { color: #e8edf8; font-size: 17px; font-weight: 800; }
 .portfolio-summary .ps-stat b em { font-style: normal; font-size: 12px; font-weight: 650; opacity: 0.85; }
 .portfolio-head,
@@ -1191,8 +1191,13 @@ h3 { font-size: 15px; }
   .glass-card { width: 100%; }
 
   /* HISTORICAL summary uses the same grid as the table below, so it stays
-     column-aligned with Pool/PnL/Deposit/… on mobile too. */
-  .portfolio-summary .ps-stat b { font-size: 15px; }
+     column-aligned with Pool/PnL/Deposit/… on mobile too. Tighten so the 5
+     single-line labels fit without wrapping (which would misalign the numbers). */
+  .portfolio-summary { gap: 9px; }
+  .portfolio-summary .ps-stat { padding-left: 9px; }
+  .portfolio-summary .ps-stat span { font-size: 10px; letter-spacing: -0.02em; }
+  .portfolio-summary .ps-stat b { font-size: 13px; }
+  .portfolio-summary .ps-stat b em { font-size: 9px; }
 
   /* The weather/music/candidate rail is ambient — only keep it on the Overview
      view. On Positions/Activity/etc. it just clutters the bottom of every tab. */
