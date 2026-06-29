@@ -41,6 +41,30 @@ type Stat = { label: string; value: string; icon: LucideIcon; tone: Tone };
 const toneClass = (tone: Tone) => (tone === 'up' ? 'profit' : tone === 'down' ? 'loss' : '');
 const formatUsd = (value: number) => `${value >= 0 ? '+' : '-'}$${Math.abs(value).toFixed(2)}`;
 
+// Live SOL balance of the bot wallet, polled from /api/wallet/balance.
+const WalletBalance = () => {
+  const [sol, setSol] = useState<number | null>(null);
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      try {
+        const res = await fetch('/api/wallet/balance', { cache: 'no-store' });
+        const data = await res.json();
+        if (mounted && data?.ok) setSol(Number(data.sol));
+      } catch { /* keep last known */ }
+    };
+    load();
+    const t = window.setInterval(load, 20_000);
+    return () => { mounted = false; window.clearInterval(t); };
+  }, []);
+  return (
+    <div className="dash-balance">
+      <span className="dash-balance-label">WALLET</span>
+      <strong>◎ {sol == null ? '…' : sol.toFixed(3)}<em> SOL</em></strong>
+    </div>
+  );
+};
+
 const ProfileNav = ({ view, setView }: { view: ViewId; setView: (v: ViewId) => void }) => {
   const [stats, setStats] = useState<Stat[]>([
     { label: 'Trades', value: '0', icon: BarChart3, tone: 'none' },
@@ -84,6 +108,7 @@ const ProfileNav = ({ view, setView }: { view: ViewId; setView: (v: ViewId) => v
       <div className="dash-profile">
         <div className="dash-avatar"><img src="/profile-avatar.png" alt="OxRapzz" /></div>
         <h1>OxRapzz</h1>
+        <WalletBalance />
       </div>
       <div className="dash-stats">
         {stats.map((s) => (

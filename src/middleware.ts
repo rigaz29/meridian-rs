@@ -15,6 +15,7 @@ export const config = {
   matcher: [
     '/api/meridian/:path*',
     '/api/agent/:path*',
+    '/api/wallet/:path*',
     '/api/chart/:path*',
     '/api/prices',
     '/api/system',
