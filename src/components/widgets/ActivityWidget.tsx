@@ -36,6 +36,7 @@ const EVENT_COLORS: Record<string, string> = {
   screen: '#8b5cf6',
   swap: '#38bdf8',
   fail: '#ef4444',
+  skip: '#c79a4e',
   info: '#7c84a3',
 };
 
@@ -79,10 +80,37 @@ const num = (value: unknown, digits = 4) => {
   return Number.isFinite(n) ? n.toFixed(digits) : null;
 };
 
+// The human reason a decision failed/was skipped (summary/result hold it).
+const failReason = (decision: Decision): string => {
+  const r =
+    decision.resultSummary
+    ?? (typeof decision.result === 'string' ? decision.result : '')
+    ?? (typeof decision.summary === 'string' ? decision.summary : '')
+    ?? decision.reason
+    ?? '';
+  return String(r);
+};
+
+// A "skip" is a deliberate gate (BB %B, dedup, cooldown, low balance) — not a
+// real on-chain error. Distinguish those from true failures.
+const isSkip = (reason: string): boolean => {
+  const r = reason.toLowerCase();
+  return r.includes('safety check')
+    || r.includes('%b')
+    || r.includes('already have position')
+    || r.includes('waiting for')
+    || r.includes('over-extended')
+    || r.includes('cooldown')
+    || r.includes('not enough sol')
+    || r.includes('position_id required');
+};
+
 // Classify a decision into a short event label + colour kind.
 const eventOf = (decision: Decision): { label: string; kind: string } => {
   const tool = (decision.tool ?? decision.action ?? '').toLowerCase();
-  if (decision.success === false) return { label: 'FAIL', kind: 'fail' };
+  if (decision.success === false) {
+    return isSkip(failReason(decision)) ? { label: 'SKIP', kind: 'skip' } : { label: 'FAIL', kind: 'fail' };
+  }
   if (tool.includes('deploy')) return { label: 'DEPLOY', kind: 'deploy' };
   if (tool.includes('close')) return { label: 'CLOSE', kind: 'close' };
   if (tool.includes('claim')) return { label: 'CLAIM', kind: 'claim' };
@@ -94,6 +122,15 @@ const eventOf = (decision: Decision): { label: string; kind: string } => {
 
 // Build a concise, human-readable message instead of dumping raw JSON.
 const humanMessage = (decision: Decision): string => {
+  // For skips/failures, show the actual reason (not "Deployed position").
+  if (decision.success === false) {
+    const reason = failReason(decision)
+      .replace(/^safety check failed:\s*/i, '')
+      .replace(/\s*—\s*price not over-extended.*$/i, '')
+      .replace(/,?\s*waiting for mean-reversion setup\.?$/i, '')
+      .trim();
+    if (reason) return reason;
+  }
   const tool = (decision.tool ?? decision.action ?? '').toLowerCase();
   const data = asObject(decision.result) ?? asObject(decision.resultSummary) ?? asObject(decision.summary) ?? {};
   const name = decision.pool_name ?? (data.poolName as string) ?? '';
