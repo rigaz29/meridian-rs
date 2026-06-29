@@ -29,7 +29,7 @@ const hmacKey = async (): Promise<CryptoKey> => {
   if (cachedKey) return cachedKey;
   cachedKey = await crypto.subtle.importKey(
     'raw',
-    enc.encode(authSecret()),
+    enc.encode(authSecret()) as BufferSource,
     { name: 'HMAC', hash: 'SHA-256' },
     false,
     ['sign', 'verify'],
@@ -42,7 +42,7 @@ type SessionPayload = { pubkey: string; exp: number };
 export const signSession = async (pubkey: string, ttlSec = DEFAULT_TTL_SEC): Promise<string> => {
   const payload: SessionPayload = { pubkey, exp: Math.floor(Date.now() / 1000) + ttlSec };
   const data = b64url(enc.encode(JSON.stringify(payload)));
-  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', await hmacKey(), enc.encode(data)));
+  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', await hmacKey(), enc.encode(data) as BufferSource));
   return `${data}.${b64url(sig)}`;
 };
 
@@ -50,7 +50,7 @@ export const verifySession = async (token?: string | null): Promise<SessionPaylo
   if (!token || !token.includes('.')) return null;
   const [data, sig] = token.split('.');
   try {
-    const ok = await crypto.subtle.verify('HMAC', await hmacKey(), b64urlToBytes(sig), enc.encode(data));
+    const ok = await crypto.subtle.verify('HMAC', await hmacKey(), b64urlToBytes(sig) as BufferSource, enc.encode(data) as BufferSource);
     if (!ok) return null;
     const payload = JSON.parse(new TextDecoder().decode(b64urlToBytes(data))) as SessionPayload;
     if (!payload.exp || payload.exp < Math.floor(Date.now() / 1000)) return null;
