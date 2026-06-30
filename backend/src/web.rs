@@ -811,13 +811,18 @@ async fn get_portfolio(State(state): State<WebAppState>) -> Json<Value> {
         Ok(p) => p,
         Err(e) => return Json(json_error("portfolio", e)),
     };
-    // Unique pools the wallet has ever held a position in.
-    let mut pools: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for p in positions.get_all() {
-        if !p.pool_address.is_empty() {
-            pools
-                .entry(p.pool_address.clone())
-                .or_insert_with(|| p.pool_name.clone().unwrap_or_default());
+    // Every pool the wallet has ever held a position in — from Meteora's
+    // /portfolio (the same source as the official UI), so the summary covers
+    // ALL positions and matches Meteora. The old approach used only the bot's
+    // tracked state, which excluded untracked/orphaned positions and badly
+    // understated total PnL. Fall back to tracked state if the API is down.
+    let mut pools: Vec<(String, String)> = crate::tools::dlmm::get_all_wallet_pools(&wallet).await;
+    if pools.is_empty() {
+        let mut seen = std::collections::HashSet::new();
+        for p in positions.get_all() {
+            if !p.pool_address.is_empty() && seen.insert(p.pool_address.clone()) {
+                pools.push((p.pool_address.clone(), p.pool_name.clone().unwrap_or_default()));
+            }
         }
     }
 

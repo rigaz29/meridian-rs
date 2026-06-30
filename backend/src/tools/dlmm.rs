@@ -1552,6 +1552,51 @@ pub struct PoolHistory {
     pub win_count: usize,
 }
 
+/// Every pool the wallet has EVER held a position in (open + closed), straight
+/// from Meteora's `/portfolio` endpoint — the same source as the official UI.
+/// The portfolio summary must use this (not the bot's tracked state) so it
+/// counts every position, including ones the bot never tracked (e.g. orphans
+/// from restarts). Returns (pool_address, display_name) pairs.
+pub async fn get_all_wallet_pools(wallet: &str) -> Vec<(String, String)> {
+    let client = make_client();
+    let url = format!("{}/portfolio?user={}", METEORA_DLMM_API, wallet);
+    let resp = match client.get(&url).send().await {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Vec::new(),
+    };
+    let val: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let pools = val
+        .get("pools")
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for p in &pools {
+        let addr = p
+            .get("poolAddress")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if addr.is_empty() {
+            continue;
+        }
+        let name = p
+            .get("tokenX")
+            .and_then(|t| {
+                t.get("symbol")
+                    .or_else(|| t.get("name"))
+                    .and_then(|v| v.as_str())
+            })
+            .map(|s| format!("{}-SOL", s))
+            .unwrap_or_default();
+        out.push((addr, name));
+    }
+    out
+}
+
 /// Fetch and aggregate a wallet's CLOSED positions for one pool from the Meteora
 /// PnL API. Returns None if the pool has no closed positions for the wallet.
 pub async fn get_pool_history(pool: &str, pool_name: &str, wallet: &str) -> Option<PoolHistory> {
