@@ -1583,13 +1583,11 @@ pub async fn get_all_wallet_pools(wallet: &str) -> Vec<(String, String)> {
         if addr.is_empty() {
             continue;
         }
+        // `tokenX` is the base-token symbol string (e.g. "Bepe").
         let name = p
             .get("tokenX")
-            .and_then(|t| {
-                t.get("symbol")
-                    .or_else(|| t.get("name"))
-                    .and_then(|v| v.as_str())
-            })
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
             .map(|s| format!("{}-SOL", s))
             .unwrap_or_default();
         out.push((addr, name));
