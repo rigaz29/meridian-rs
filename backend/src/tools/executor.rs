@@ -761,6 +761,20 @@ impl ToolExecutor {
                         let reason = args["reason"].as_str().unwrap_or("agent decision");
                         let pnl = pos.pnl_sol.unwrap_or(0.0);
                         positions.record_close(&pos.id, pnl);
+                        // Persist immediately so the closed position drops off the
+                        // Open tab right away instead of lingering until the
+                        // cycle-end save.
+                        {
+                            let state_path =
+                                std::env::var("MERIDIAN_STATE_PATH").unwrap_or_else(|_| {
+                                    meridian_data_path("meridian-state.json")
+                                        .to_string_lossy()
+                                        .into_owned()
+                                });
+                            if let Err(e) = positions.save(&state_path) {
+                                warn("executor", &format!("close state save failed: {}", e));
+                            }
+                        }
                         pool_memory.record_deploy(
                             &pos.pool_address,
                             PoolDeployInput {
@@ -1775,6 +1789,24 @@ impl ToolExecutor {
                                 })),
                                 ..crate::state::positions::TrackedPosition::default()
                             });
+                        }
+
+                        // Persist immediately so the positions API reflects the
+                        // new position right away. The screening cycle otherwise
+                        // only saves at its end, leaving freshly-deployed
+                        // positions invisible to the dashboard for the rest of
+                        // the cycle (while the activity log already showed the
+                        // deploy from the per-tool decision log).
+                        if result.success || config.dry_run {
+                            let state_path =
+                                std::env::var("MERIDIAN_STATE_PATH").unwrap_or_else(|_| {
+                                    meridian_data_path("meridian-state.json")
+                                        .to_string_lossy()
+                                        .into_owned()
+                                });
+                            if let Err(e) = positions.save(&state_path) {
+                                warn("executor", &format!("deploy state save failed: {}", e));
+                            }
                         }
 
                         Ok(serde_json::to_string_pretty(&result)?)
