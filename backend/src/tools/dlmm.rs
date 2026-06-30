@@ -1637,6 +1637,33 @@ pub async fn get_pool_history(pool: &str, pool_name: &str, wallet: &str) -> Opti
     Some(history)
 }
 
+/// Sum a pool's CURRENTLY-OPEN positions' unrealized PnL (USD) for the wallet,
+/// from Meteora's PnL API (status=open). Mirrors `get_pool_history` but for the
+/// live side, so the portfolio headline can match Meteora's realtime total
+/// (closed realized + open unrealized) instead of closed-only. Returns 0.0 on
+/// any API/parse failure (degrade gracefully).
+pub async fn get_pool_open_pnl(pool: &str, wallet: &str) -> f64 {
+    let client = make_client();
+    let url = format!(
+        "{}/positions/{}/pnl?user={}&status=open&pageSize=100&page=1",
+        METEORA_DLMM_API, pool, wallet,
+    );
+    let Ok(resp) = client.get(&url).send().await else {
+        return 0.0;
+    };
+    if !resp.status().is_success() {
+        return 0.0;
+    }
+    let Ok(data) = resp.json::<PnlPoolResponse>().await else {
+        return 0.0;
+    };
+    data.positions
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|p| p.pnl_usd)
+        .sum()
+}
+
 /// Best-effort fetch of a pool's display name (e.g. "drooling-SOL").
 pub async fn get_pool_name(pool_address: &str) -> Option<String> {
     get_pool_metadata(pool_address)

@@ -853,7 +853,7 @@ async fn get_portfolio(State(state): State<WebAppState>) -> Json<Value> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let total_pnl: f64 = histories.iter().map(|h| h.pnl_usd).sum();
+    let realized_pnl: f64 = histories.iter().map(|h| h.pnl_usd).sum();
     let total_deposit: f64 = histories.iter().map(|h| h.deposit_usd).sum();
     let total_fees: f64 = histories.iter().map(|h| h.fees_usd).sum();
     let closed_count: usize = histories.iter().map(|h| h.closed_count).sum();
@@ -868,6 +868,30 @@ async fn get_portfolio(State(state): State<WebAppState>) -> Json<Value> {
     } else {
         0.0
     };
+
+    // Live unrealized PnL of the wallet's OPEN positions, fetched per pool in
+    // parallel. Meteora's headline total marks open positions to market in
+    // real time; summing closed-only made our total diverge (more negative)
+    // whenever open positions were in profit. Add it so the headline tracks
+    // Meteora and updates as prices move.
+    let mut unrealized_pnl = 0.0;
+    if !wallet.is_empty() {
+        let mut set = tokio::task::JoinSet::new();
+        for (pool, _name) in &pools {
+            let pool = pool.clone();
+            let wallet = wallet.clone();
+            set.spawn(
+                async move { crate::tools::dlmm::get_pool_open_pnl(&pool, &wallet).await },
+            );
+        }
+        while let Some(res) = set.join_next().await {
+            if let Ok(v) = res {
+                unrealized_pnl += v;
+            }
+        }
+    }
+
+    let total_pnl = realized_pnl + unrealized_pnl;
     let total_pnl_pct = if total_deposit > 0.0 {
         total_pnl / total_deposit * 100.0
     } else {
@@ -880,6 +904,8 @@ async fn get_portfolio(State(state): State<WebAppState>) -> Json<Value> {
             "summary": {
                 "totalPnlUsd": total_pnl,
                 "totalPnlPct": total_pnl_pct,
+                "realizedPnlUsd": realized_pnl,
+                "unrealizedPnlUsd": unrealized_pnl,
                 "allTimeDepositUsd": total_deposit,
                 "feesClaimedUsd": total_fees,
                 "closedCount": closed_count,
