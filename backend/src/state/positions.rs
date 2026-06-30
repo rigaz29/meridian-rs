@@ -684,18 +684,23 @@ pub fn get_deterministic_close_rule(
         }
     }
 
-    // ── MIN-DURATION GATE ────────────────────────────────────────
-    // Suppress all exits for brand-new positions to avoid premature closes
-    // from initial price noise (swaps settling right after deploy).
-    if position_age_minutes(pos) < config.risk.min_position_duration_min {
-        return None;
-    }
-
-    // ── Rule 1: Stop Loss ────────────────────────────────────────
+    // ── Rule 1: Stop Loss (downside cap — runs BEFORE the min-duration gate) ─
+    // A fast dump must be cut even on a brand-new position. The biggest losses
+    // (e.g. -10%) came from tokens that crashed within the first few minutes
+    // while the gate below suppressed every exit. Require ~1 min of age so a
+    // transient just-deployed valuation glitch can't false-trigger.
     if let Some(sl_pct) = config.risk.stop_loss_pct {
-        if pnl_pct <= sl_pct {
+        if pnl_pct <= sl_pct && position_age_minutes(pos) >= 1 {
             return Some(CloseRule::StopLoss);
         }
+    }
+
+    // ── MIN-DURATION GATE (soft exits only) ──────────────────────
+    // Suppress the softer/noise-sensitive exits for brand-new positions to
+    // avoid premature closes from initial price noise. The stop loss above is
+    // intentionally exempt — the downside cap is never suppressed.
+    if position_age_minutes(pos) < config.risk.min_position_duration_min {
+        return None;
     }
 
     // ── Rule 2: Take Profit ──────────────────────────────────────
