@@ -284,7 +284,7 @@ export const PositionTable = () => {
     const loadPositions = async () => {
       try {
         const [payload, candidatesPayload] = await Promise.all([
-          cachedJson<any>('/api/meridian/positions', 8_000),
+          cachedJson<any>('/api/meridian/positions', 4_000),
           cachedJson<any>('/api/meridian/candidates?limit=40', 60_000),
         ]);
         const positionsPayload = Array.isArray(payload?.data?.positions)
@@ -328,7 +328,7 @@ export const PositionTable = () => {
     };
 
     loadPositions();
-    const timer = window.setInterval(loadPositions, 10_000);
+    const timer = window.setInterval(loadPositions, 5_000);
     return () => {
       isMounted = false;
       window.clearInterval(timer);

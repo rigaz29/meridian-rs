@@ -54,7 +54,7 @@ const WalletBalance = () => {
       } catch { /* keep last known */ }
     };
     load();
-    const t = window.setInterval(load, 20_000);
+    const t = window.setInterval(load, 8_000);
     return () => { mounted = false; window.clearInterval(t); };
   }, []);
   return (
@@ -80,8 +80,8 @@ const ProfileNav = ({ view, setView }: { view: ViewId; setView: (v: ViewId) => v
         // Use the same authoritative source as the Historical/Portfolio card
         // (Meteora-aggregated closed positions) so the profile stats match.
         const [status, portfolio] = await Promise.all([
-          cachedJson<any>('/api/meridian/status', 8_000),
-          cachedJson<any>('/api/meridian/portfolio', 60_000),
+          cachedJson<any>('/api/meridian/status', 4_000),
+          cachedJson<any>('/api/meridian/portfolio', 30_000),
         ]);
         const active = status?.data?.active_positions ?? 0;
         const s = portfolio?.data?.summary ?? {};
@@ -99,7 +99,7 @@ const ProfileNav = ({ view, setView }: { view: ViewId; setView: (v: ViewId) => v
       } catch { /* keep fallback */ }
     };
     load();
-    const t = window.setInterval(load, 10_000);
+    const t = window.setInterval(load, 5_000);
     return () => { mounted = false; window.clearInterval(t); };
   }, []);
 
