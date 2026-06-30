@@ -2,6 +2,21 @@ use anyhow::Result;
 use reqwest::Client;
 use serde_json::json;
 
+use crate::config::types::Config;
+
+/// Fire-and-forget alert to the configured admin chat (no-op if Telegram isn't
+/// configured). Used for deploy/close notifications from the trading loop.
+pub async fn alert(config: &Config, text: &str) {
+    if let (Some(token), Some(chat)) = (
+        config.api.telegram_bot_token.as_deref(),
+        config.api.telegram_chat_id.as_deref(),
+    ) {
+        if !token.is_empty() && !chat.is_empty() {
+            let _ = send_message_safe(token, chat, text).await;
+        }
+    }
+}
+
 /// Send a text message to the configured Telegram chat.
 pub async fn send_message(bot_token: &str, chat_id: &str, text: &str) -> Result<()> {
     let url = format!("https://api.telegram.org/bot{}/sendMessage", bot_token);

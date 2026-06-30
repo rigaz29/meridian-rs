@@ -603,6 +603,10 @@ async fn main() -> Result<()> {
     });
 
     // ── Screening Cycle (every N minutes) ─────────────────────
+    // Shared trading toggle, flipped via Telegram /start /stop. Gates the
+    // screening cycle (new deploys); management & close still run when paused.
+    let trading_enabled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+
     let screen_interval =
         tokio::time::Duration::from_secs(config.schedule.screening_interval_min as u64 * 60);
     let config_screen = config.clone();
@@ -612,6 +616,19 @@ async fn main() -> Result<()> {
     let wallet_screen = wallet_address.clone();
     let mut shutdown_screen = shutdown_rx.clone();
     let redeploy_notify_screen = redeploy_notify.clone();
+    let trading_enabled_screen = trading_enabled.clone();
+
+    // Interactive Telegram control (admin-only). No-op if Telegram isn't
+    // configured. Handles /status /positions /pnl /balance /candidates and
+    // flips `trading_enabled` on /start /stop; /close closes a position.
+    {
+        let tg_config = config.clone();
+        let tg_state = state_path.clone();
+        let tg_enabled = trading_enabled.clone();
+        tokio::spawn(async move {
+            tools::telegram_bot::run(tg_config, tg_state, tg_enabled).await;
+        });
+    }
 
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(screen_interval);
@@ -626,6 +643,12 @@ async fn main() -> Result<()> {
                     info("screen", "Shutdown signal received, stopping screening cycle");
                     break;
                 }
+            }
+
+            // Telegram /stop pauses NEW deploys (management/close keep running).
+            if !trading_enabled_screen.load(std::sync::atomic::Ordering::SeqCst) {
+                info("screen", "Trading paused (/stop) — skipping screening cycle");
+                continue;
             }
 
             let mut positions = match PositionState::load(&screen_state_path) {

@@ -775,6 +775,19 @@ impl ToolExecutor {
                                 warn("executor", &format!("close state save failed: {}", e));
                             }
                         }
+                        // Telegram alert on close (pool + realized PnL + reason).
+                        {
+                            let label = pos
+                                .pool_name
+                                .clone()
+                                .unwrap_or_else(|| pos.pool_address.chars().take(8).collect());
+                            let icon = if pnl >= 0.0 { "✅" } else { "🔻" };
+                            crate::tools::telegram::alert(
+                                config,
+                                &format!("{icon} Closed {label} — PnL {pnl:+.4} SOL ({reason})"),
+                            )
+                            .await;
+                        }
                         pool_memory.record_deploy(
                             &pos.pool_address,
                             PoolDeployInput {
@@ -968,12 +981,34 @@ impl ToolExecutor {
                 // Record in pool memory
                 if let Some(pool) = args["pool_address"].as_str() {
                     let sym = args["symbol"].as_str().unwrap_or("unknown");
+                    let amount = args["amount_y"]
+                        .as_f64()
+                        .or_else(|| args["amount_sol"].as_f64())
+                        .unwrap_or(0.0);
                     let note = format!(
                         "DEPLOYED — bins_below={}, amount={}",
                         args["bins_below"].as_i64().unwrap_or(0),
-                        args["amount_y"].as_f64().unwrap_or(0.0),
+                        amount,
                     );
                     pool_memory.add_note(pool, "", Some(sym), &note);
+
+                    // Telegram alert on a real (non-failed) deploy.
+                    let deployed = serde_json::from_str::<Value>(result)
+                        .ok()
+                        .and_then(|v| v.get("success").and_then(Value::as_bool))
+                        .unwrap_or(false);
+                    if deployed {
+                        let label = if sym != "unknown" {
+                            sym.to_string()
+                        } else {
+                            pool.chars().take(8).collect()
+                        };
+                        crate::tools::telegram::alert(
+                            config,
+                            &format!("🚀 Deployed {label} — {amount:.3} SOL"),
+                        )
+                        .await;
+                    }
                 }
             }
             _ => {}
