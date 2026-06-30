@@ -1,0 +1,237 @@
+//! GMGN OpenAPI fee source.
+//!
+//! Port of the original Node.js `tools/gmgn.js`. Provides cumulative token fee
+//! figures (`total_fee` / `trade_fee` in SOL) used as the primary
+//! `minTokenFeesSol` screening gate, with graceful fallback to pool/Jupiter
+//! fees when no API key is configured.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::time::Duration;
+
+use serde_json::Value;
+use tokio::sync::Mutex;
+use tokio::time::{sleep, Instant};
+
+use crate::config::Config;
+use crate::utils::logger::module;
+
+/// Cumulative token fees reported by GMGN, in SOL.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct GmgnTokenFees {
+    pub total_fee: Option<f64>,
+    pub trade_fee: Option<f64>,
+}
+
+/// Whether a GMGN API key is configured (config or `GMGN_API_KEY` env).
+pub fn has_gmgn_api_key(config: &Config) -> bool {
+    config
+        .gmgn
+        .api_key
+        .as_deref()
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false)
+        || std::env::var("GMGN_API_KEY")
+            .map(|k| !k.trim().is_empty())
+            .unwrap_or(false)
+}
+
+fn api_key(config: &Config) -> Option<String> {
+    config
+        .gmgn
+        .api_key
+        .as_deref()
+        .filter(|k| !k.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var("GMGN_API_KEY")
+                .ok()
+                .filter(|k| !k.trim().is_empty())
+        })
+}
+
+/// Process-wide pacer to keep GMGN requests under the configured delay.
+fn pacer() -> &'static Mutex<Option<Instant>> {
+    static PACER: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    PACER.get_or_init(|| Mutex::new(None))
+}
+
+/// Throttle so consecutive requests are at least `delay_ms` apart.
+async fn pace_request(delay_ms: u64) {
+    if delay_ms == 0 {
+        return;
+    }
+    let delay = Duration::from_millis(delay_ms);
+    let mut last = pacer().lock().await;
+    if let Some(prev) = *last {
+        let elapsed = prev.elapsed();
+        if elapsed < delay {
+            sleep(delay - elapsed).await;
+        }
+    }
+    *last = Some(Instant::now());
+}
+
+/// Generate a unique-ish client id (replaces JS `randomUUID`). GMGN only needs
+/// it to be unique per request, not cryptographically random.
+fn client_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let ts = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
+    format!("rs-{:x}-{:x}", ts, seq)
+}
+
+fn num(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+/// Low-level GMGN GET with rate limiting and 429/ban backoff.
+async fn gmgn_fetch(
+    config: &Config,
+    pathname: &str,
+    params: &[(&str, String)],
+) -> anyhow::Result<Value> {
+    let key = api_key(config)
+        .ok_or_else(|| anyhow::anyhow!("GMGN_API_KEY is required for the GMGN fee source"))?;
+    let base = config.gmgn.base_url.trim_end_matches('/');
+    let max_retries = config.gmgn.max_retries;
+    let client = reqwest::Client::new();
+
+    for attempt in 0..=max_retries {
+        pace_request(config.gmgn.request_delay_ms).await;
+
+        let mut req = client
+            .get(format!("{}{}", base, pathname))
+            .header("X-APIKEY", &key)
+            .header("Content-Type", "application/json")
+            .query(&[
+                ("timestamp", (chrono::Utc::now().timestamp()).to_string()),
+                ("client_id", client_id()),
+            ]);
+        for (k, v) in params {
+            req = req.query(&[(*k, v)]);
+        }
+
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                if attempt < max_retries {
+                    continue;
+                }
+                return Err(anyhow::anyhow!("GMGN {} request failed: {}", pathname, e));
+            }
+        };
+
+        let status = resp.status();
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<f64>().ok());
+        let text = resp.text().await.unwrap_or_default();
+        let payload: Value =
+            serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({ "raw": text }));
+
+        if status.is_success() {
+            return Ok(payload);
+        }
+
+        let message = payload
+            .get("message")
+            .and_then(Value::as_str)
+            .or_else(|| payload.get("error").and_then(Value::as_str))
+            .or_else(|| payload.get("raw").and_then(Value::as_str))
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("GMGN {} {}", pathname, status));
+
+        let lower = message.to_ascii_lowercase();
+        let rate_limited = status.as_u16() == 429
+            || lower.contains("rate limit")
+            || lower.contains("temporarily banned");
+
+        if rate_limited && attempt < max_retries {
+            let backoff_ms = if let Some(secs) = retry_after {
+                (secs * 1000.0) as u64
+            } else if lower.contains("temporarily banned") {
+                60_000
+            } else {
+                (3_000u64 * 2u64.pow(attempt)).min(30_000)
+            };
+            sleep(Duration::from_millis(backoff_ms)).await;
+            continue;
+        }
+
+        return Err(anyhow::anyhow!(message));
+    }
+
+    Err(anyhow::anyhow!("GMGN {} failed", pathname))
+}
+
+/// Fetch cumulative token fees (SOL) for the `minTokenFeesSol` gate.
+///
+/// Returns `None` on missing key or any error so callers fall back to the
+/// pool/Jupiter fee figure (matching the original JS behavior).
+pub async fn get_gmgn_token_fees(mint: &str, config: &Config) -> Option<GmgnTokenFees> {
+    if mint.is_empty() || !has_gmgn_api_key(config) {
+        return None;
+    }
+
+    let params = [("chain", "sol".to_string()), ("address", mint.to_string())];
+    match gmgn_fetch(config, "/v1/token/info", &params).await {
+        Ok(payload) => {
+            // payload.data.data || payload.data || payload
+            let info = payload
+                .get("data")
+                .and_then(|d| d.get("data"))
+                .or_else(|| payload.get("data"))
+                .unwrap_or(&payload);
+            if !info.is_object() {
+                return None;
+            }
+            Some(GmgnTokenFees {
+                total_fee: info.get("total_fee").and_then(num),
+                trade_fee: info.get("trade_fee").and_then(num),
+            })
+        }
+        Err(e) => {
+            let short: String = mint.chars().take(8).collect();
+            module::warn(
+                "gmgn",
+                &format!("token fees lookup failed for {}: {}", short, e),
+            );
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn has_key_reads_config() {
+        let mut config = Config::default();
+        assert!(!has_gmgn_api_key(&config));
+        config.gmgn.api_key = Some("  ".to_string());
+        assert!(!has_gmgn_api_key(&config));
+        config.gmgn.api_key = Some("abc123".to_string());
+        assert!(has_gmgn_api_key(&config));
+    }
+
+    #[test]
+    fn num_coerces_strings_and_numbers() {
+        assert_eq!(num(&serde_json::json!(1.5)), Some(1.5));
+        assert_eq!(num(&serde_json::json!("2.25")), Some(2.25));
+        assert_eq!(num(&serde_json::json!("nan-ish")), None);
+        assert_eq!(num(&serde_json::json!(null)), None);
+    }
+
+    #[test]
+    fn client_id_is_unique() {
+        assert_ne!(client_id(), client_id());
+    }
+}

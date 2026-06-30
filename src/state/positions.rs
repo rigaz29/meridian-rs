@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::types::Config;
@@ -17,6 +18,7 @@ const SYNC_GRACE_MS: i64 = 5 * 60_000;
 const PEAK_CONFIRMATION_WAIT_SECONDS: u64 = 15;
 const TRAILING_DROP_CONFIRMATION_WAIT_SECONDS: u64 = 15;
 const TRAILING_EXIT_WINDOW_MS: i64 = 30_000;
+static STATE_SAVE_LOCK: Mutex<()> = Mutex::new(());
 
 // ─── Position Status ────────────────────────────────────────────
 
@@ -36,6 +38,9 @@ pub enum PositionStatus {
 pub struct TrailingState {
     /// Highest confirmed peak PnL percentage
     pub peak_pnl_pct: Option<f64>,
+    /// Lowest (worst) PnL percentage ever seen — drives the safety-exit gate.
+    #[serde(default)]
+    pub max_drawdown_pct: Option<f64>,
     /// Whether trailing TP mode is active (peak has exceeded trigger threshold)
     pub trailing_active: bool,
     /// Pending peak confirmation being resolved (15s recheck)
@@ -64,6 +69,7 @@ pub struct PendingConfirmation {
 pub enum CloseRule {
     StopLoss,
     TakeProfit,
+    SafetyExit,
     PumpedAboveRange,
     OutOfRange,
     LowYield,
@@ -81,6 +87,22 @@ pub struct TrackedPosition {
     pub base_mint: String,
     #[serde(default)]
     pub base_symbol: Option<String>,
+    #[serde(default)]
+    pub strategy: Option<String>,
+    #[serde(default)]
+    pub amount_x: f64,
+    #[serde(default)]
+    pub active_bin_at_deploy: Option<i32>,
+    #[serde(default)]
+    pub bin_step: Option<u32>,
+    #[serde(default)]
+    pub volatility: Option<f64>,
+    #[serde(default)]
+    pub fee_tvl_ratio: Option<f64>,
+    #[serde(default)]
+    pub organic_score: Option<f64>,
+    #[serde(default)]
+    pub initial_value_usd: Option<f64>,
     pub lower_bin: i32,
     pub upper_bin: i32,
     pub amount_sol: f64,
@@ -97,6 +119,10 @@ pub struct TrackedPosition {
     pub entry_holders: Option<u64>,
     #[serde(default)]
     pub total_fees_claimed: f64,
+    #[serde(default)]
+    pub total_fees_claimed_usd: f64,
+    #[serde(default)]
+    pub rebalance_count: u32,
     #[serde(default)]
     pub instruction: Option<String>,
     #[serde(default)]
@@ -126,6 +152,14 @@ impl Default for TrackedPosition {
             pool_name: None,
             base_mint: String::new(),
             base_symbol: None,
+            strategy: None,
+            amount_x: 0.0,
+            active_bin_at_deploy: None,
+            bin_step: None,
+            volatility: None,
+            fee_tvl_ratio: None,
+            organic_score: None,
+            initial_value_usd: None,
             lower_bin: 0,
             upper_bin: 0,
             amount_sol: 0.0,
@@ -136,6 +170,8 @@ impl Default for TrackedPosition {
             entry_volume: None,
             entry_holders: None,
             total_fees_claimed: 0.0,
+            total_fees_claimed_usd: 0.0,
+            rebalance_count: 0,
             instruction: None,
             note: None,
             out_of_range_since: None,
@@ -187,13 +223,32 @@ impl PositionState {
             return Ok(Self::default());
         }
         let content = fs::read_to_string(path)?;
-        let state: Self = serde_json::from_str(&content).unwrap_or_default();
-        Ok(state)
+        match serde_json::from_str(&content) {
+            Ok(state) => Ok(state),
+            Err(_) => Ok(recover_state_from_partial_json(&content).unwrap_or_default()),
+        }
     }
 
     /// Save state to a JSON file, updating the last_updated timestamp.
     pub fn save(&self, path: &str) -> Result<()> {
-        fs::write(path, serde_json::to_string_pretty(self)?)?;
+        let _guard = STATE_SAVE_LOCK.lock().expect("state save lock poisoned");
+        let target = Path::new(path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let temp_path = target.with_extension(format!(
+            "tmp-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::write(&temp_path, serde_json::to_string_pretty(self)?)?;
+        if target.exists() {
+            fs::remove_file(target)?;
+        }
+        fs::rename(temp_path, target)?;
         Ok(())
     }
 
@@ -302,6 +357,50 @@ impl PositionState {
             self.push_event(EventType::Close, &id_owned, &details);
             self.last_updated = Some(Utc::now().to_rfc3339());
         }
+    }
+
+    /// Adopt a position discovered on-chain that isn't tracked yet (e.g. a
+    /// deploy whose state write was lost). Inserts it as Active without firing a
+    /// Deploy event. No-op if already present.
+    pub fn adopt(&mut self, pos: TrackedPosition) {
+        if self.positions.contains_key(&pos.id) {
+            return;
+        }
+        let id = pos.id.clone();
+        let pool_display = pos
+            .pool_name
+            .clone()
+            .unwrap_or_else(|| pos.pool_address.clone());
+        self.positions.insert(pos.id.clone(), pos);
+        self.push_event(
+            EventType::Deploy,
+            &id,
+            &format!("Adopted on-chain position in {}", pool_display),
+        );
+        self.last_updated = Some(Utc::now().to_rfc3339());
+    }
+
+    /// Mark a tracked position as orphaned: it no longer exists on-chain
+    /// (a phantom from a failed/un-landed deploy, or closed outside the agent).
+    /// Moves it to `Closed` so it leaves active management while keeping the
+    /// record for history. Returns true if a matching active position was found.
+    pub fn mark_orphaned(&mut self, id: &str) -> bool {
+        let Some(p) = self.positions.get_mut(id) else {
+            return false;
+        };
+        if p.status == PositionStatus::Closed {
+            return false;
+        }
+        p.status = PositionStatus::Closed;
+        let pool_display = p
+            .pool_name
+            .clone()
+            .unwrap_or_else(|| p.pool_address.clone());
+        let details = format!("Pruned {} — position not found on-chain", pool_display);
+        let id_owned = id.to_string();
+        self.push_event(EventType::Close, &id_owned, &details);
+        self.last_updated = Some(Utc::now().to_rfc3339());
+        true
     }
 
     // ── Instructions ─────────────────────────────────────────────
@@ -460,6 +559,7 @@ impl PositionState {
             on_chain_addresses.iter().map(|s| s.as_str()).collect();
         let now_ms = epoch_ms();
         let mut changed = false;
+        let mut close_events = Vec::new();
 
         for pos in self.positions.values_mut() {
             if pos.status == PositionStatus::Closed || active_set.contains(pos.id.as_str()) {
@@ -474,7 +574,19 @@ impl PositionState {
 
             pos.status = PositionStatus::Closed;
             pos.note = Some("Auto-closed during state sync (not found on-chain)".to_string());
+            let pool_display = pos
+                .pool_name
+                .clone()
+                .unwrap_or_else(|| pos.pool_address.clone());
+            close_events.push((
+                pos.id.clone(),
+                format!("Closed {} — not found during state sync", pool_display),
+            ));
             changed = true;
+        }
+
+        for (id, details) in close_events {
+            self.push_event(EventType::Close, &id, &details);
         }
 
         if changed {
@@ -502,6 +614,42 @@ impl PositionState {
     pub fn get_recent(&self, limit: usize) -> Vec<&RecentEvent> {
         self.recent_events.iter().rev().take(limit).collect()
     }
+}
+
+fn recover_state_from_partial_json(content: &str) -> Option<PositionState> {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (idx, ch) in content.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    let end = idx + ch.len_utf8();
+                    if let Ok(state) = serde_json::from_str::<PositionState>(&content[..end]) {
+                        return Some(state);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 // ─── Deterministic Close Rules ──────────────────────────────────
@@ -536,11 +684,23 @@ pub fn get_deterministic_close_rule(
         }
     }
 
-    // ── Rule 1: Stop Loss ────────────────────────────────────────
+    // ── Rule 1: Stop Loss (downside cap — runs BEFORE the min-duration gate) ─
+    // A fast dump must be cut even on a brand-new position. The biggest losses
+    // (e.g. -10%) came from tokens that crashed within the first few minutes
+    // while the gate below suppressed every exit. Require ~1 min of age so a
+    // transient just-deployed valuation glitch can't false-trigger.
     if let Some(sl_pct) = config.risk.stop_loss_pct {
-        if pnl_pct <= sl_pct {
+        if pnl_pct <= sl_pct && position_age_minutes(pos) >= 1 {
             return Some(CloseRule::StopLoss);
         }
+    }
+
+    // ── MIN-DURATION GATE (soft exits only) ──────────────────────
+    // Suppress the softer/noise-sensitive exits for brand-new positions to
+    // avoid premature closes from initial price noise. The stop loss above is
+    // intentionally exempt — the downside cap is never suppressed.
+    if position_age_minutes(pos) < config.risk.min_position_duration_min {
+        return None;
     }
 
     // ── Rule 2: Take Profit ──────────────────────────────────────
@@ -550,15 +710,32 @@ pub fn get_deterministic_close_rule(
         }
     }
 
+    // ── Rule 2b: Safety Exit ─────────────────────────────────────
+    // Once a position's max drawdown has hit the danger zone, it tends to only
+    // slow-bleed or rug — big rebounds are rare. So lower its take-profit to the
+    // safety level (e.g. breakeven): bank the bounce instead of waiting for the
+    // full TP that usually never comes. Conservative; fits the spot strategy.
+    if config.risk.safety_exit_enabled {
+        let max_dd = pos.trailing.max_drawdown_pct.unwrap_or(0.0);
+        if max_dd <= config.risk.safety_exit_trigger_pct
+            && pnl_pct >= config.risk.safety_exit_tp_pct
+        {
+            return Some(CloseRule::SafetyExit);
+        }
+    }
+
     // ── Rule 3: Pumped Above Range ───────────────────────────────
     if active_bin > pos.upper_bin + 50 {
         return Some(CloseRule::PumpedAboveRange);
     }
 
     // ── Rule 4: Out of Range Too Long ────────────────────────────
-    if active_bin > pos.upper_bin
-        && minutes_out_of_range >= config.management.out_of_range_wait_minutes
-    {
+    // out_of_range_since (hence minutes_out_of_range) is only set while the
+    // position is actually OOR per the live on-chain flag, so the timer alone is
+    // the reliable trigger. The old `active_bin > upper_bin` guard was broken:
+    // stored bins are relative while the live active_bin is absolute/placeholder,
+    // so it never matched and OOR positions were never closed.
+    if minutes_out_of_range >= config.management.out_of_range_wait_minutes {
         return Some(CloseRule::OutOfRange);
     }
 
@@ -589,6 +766,13 @@ pub fn update_trailing_state(
     trailing_trigger_pct: f64,
     trailing_drop_pct: f64,
 ) {
+    // Track worst PnL ever seen (for the safety-exit gate).
+    pos.trailing.max_drawdown_pct = Some(
+        pos.trailing
+            .max_drawdown_pct
+            .map_or(current_pnl_pct, |m| m.min(current_pnl_pct)),
+    );
+
     // Activate trailing TP once confirmed peak exceeds trigger
     if !pos.trailing.trailing_active {
         let peak = pos.trailing.peak_pnl_pct.unwrap_or(0.0);
@@ -891,6 +1075,10 @@ mod tests {
                 stop_loss_pct: Some(-15.0),
                 cooldown_loss_pct: -5.0,
                 cooldown_duration_min: 60,
+                safety_exit_enabled: false,
+                safety_exit_trigger_pct: -8.0,
+                safety_exit_tp_pct: 0.0,
+                min_position_duration_min: 0,
             },
             ..Config::default()
         }
@@ -987,6 +1175,24 @@ mod tests {
     }
 
     #[test]
+    fn test_mark_orphaned_closes_and_leaves_active_set() {
+        let mut state = PositionState::default();
+        state.add(test_position());
+        assert_eq!(state.count_active(), 1);
+
+        // First prune moves it out of active management.
+        assert!(state.mark_orphaned("test-pos-1"));
+        let pos = state.positions.get("test-pos-1").unwrap();
+        assert_eq!(pos.status, PositionStatus::Closed);
+        assert_eq!(state.count_active(), 0);
+
+        // Idempotent: re-pruning an already-closed position is a no-op.
+        assert!(!state.mark_orphaned("test-pos-1"));
+        // Unknown id is a no-op too.
+        assert!(!state.mark_orphaned("nonexistent"));
+    }
+
+    #[test]
     fn test_set_instruction() {
         let mut state = PositionState::default();
         state.add(test_position());
@@ -1071,6 +1277,52 @@ mod tests {
         assert_eq!(recent.len(), 5);
         // Most recent should be deploy #24
         assert_eq!(recent[0].details, "Deploy #24");
+    }
+
+    #[test]
+    fn sync_open_positions_records_close_event_for_missing_position() {
+        let mut state = PositionState::default();
+        let mut position = test_position();
+        position.created_at = (Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+        state.add(position);
+
+        state.sync_open_positions(vec![]);
+
+        let position = state
+            .positions
+            .get("test-pos-1")
+            .expect("position remains tracked");
+        assert_eq!(position.status, PositionStatus::Closed);
+        assert!(state
+            .recent_events
+            .iter()
+            .any(|event| event.event_type == EventType::Close
+                && event.details.contains("not found during state sync")));
+    }
+
+    #[test]
+    fn load_recovers_state_when_file_has_trailing_partial_write() {
+        let dir = std::env::temp_dir().join(format!(
+            "meridian-state-recovery-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("test dir");
+        let path = dir.join("state.json");
+
+        let mut state = PositionState::default();
+        state.add(test_position());
+        let mut content = serde_json::to_string_pretty(&state).expect("serialize state");
+        content.push_str(":00\"\n}");
+        fs::write(&path, content).expect("write corrupt state");
+
+        let loaded = PositionState::load(path.to_str().unwrap()).expect("load state");
+
+        assert_eq!(loaded.positions.len(), 1);
+        assert_eq!(loaded.recent_events.len(), 1);
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]

@@ -28,11 +28,26 @@ pub fn load_keypair_from_secret(secret: &str) -> Result<Keypair> {
         anyhow::bail!("wallet private key is empty");
     }
 
-    let bytes = if trimmed.starts_with('[') {
-        serde_json::from_str::<Vec<u8>>(trimmed)
-            .map_err(|e| anyhow!("failed to parse wallet private key JSON array: {}", e))?
+    // Support referencing a Solana CLI keypair by FILE PATH (e.g. id.json).
+    // Safer than pasting the raw secret into env — the key is read at runtime
+    // and never echoed. Detected when the value isn't itself a JSON array and
+    // points to an existing file (use forward slashes on Windows so the path
+    // survives .env parsing).
+    let source = if !trimmed.starts_with('[') && std::path::Path::new(trimmed).is_file() {
+        std::fs::read_to_string(trimmed)
+            .map_err(|e| anyhow!("failed to read keypair file {}: {}", trimmed, e))?
+            .trim()
+            .to_string()
     } else {
-        bs58::decode(trimmed)
+        trimmed.to_string()
+    };
+    let source = source.as_str();
+
+    let bytes = if source.starts_with('[') {
+        serde_json::from_str::<Vec<u8>>(source)
+            .map_err(|e| anyhow!("failed to parse wallet keypair JSON array: {}", e))?
+    } else {
+        bs58::decode(source)
             .into_vec()
             .map_err(|e| anyhow!("failed to decode wallet private key as base58: {}", e))?
     };
@@ -214,19 +229,6 @@ pub struct JupiterExecuteRequest {
     pub request_id: String,
 }
 
-/// Jupiter Swap V2 execute response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct JupiterExecuteResponse {
-    pub status: Option<String>,
-    pub signature: Option<String>,
-    pub code: Option<String>,
-    pub input_amount_result: Option<String>,
-    pub output_amount_result: Option<String>,
-    #[serde(flatten)]
-    pub extra: std::collections::HashMap<String, serde_json::Value>,
-}
-
 /// Swap result returned to the LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -326,32 +328,53 @@ fn get_referral_params(config: &Config) -> Option<(String, u32)> {
 
 // ─── Public API ──────────────────────────────────────────────────
 
-/// Get wallet balances (SOL + tokens) via Helius Wallet API.
-///
-/// Calls `https://api.helius.xyz/v1/wallet/{address}/balances` and
-/// returns a `WalletBalances` struct with SOL, USDC, and all SPL tokens.
-pub async fn get_wallet_balances(
-    _rpc_url: &str,
-    pubkey: &str,
-    helius_api_key: &str,
-) -> Result<WalletBalances> {
-    let client = reqwest::Client::new();
-
-    let url = format!(
-        "https://api.helius.xyz/v1/wallet/{}/balances?api-key={}",
-        pubkey, helius_api_key,
-    );
-
+/// Minimal Solana JSON-RPC POST helper. Returns the parsed `result` value, or
+/// `None` on transport/parse failure.
+async fn rpc_call(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> Option<serde_json::Value> {
     let resp = client
-        .get(&url)
+        .post(rpc_url)
         .timeout(std::time::Duration::from_secs(15))
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": method, "params": params,
+        }))
         .send()
         .await
-        .map_err(|e| anyhow!("Helius API request failed: {}", e))?;
+        .ok()?
+        .json::<serde_json::Value>()
+        .await
+        .ok()?;
+    resp.get("result").cloned()
+}
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const SPL_TOKEN_PROGRAM: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+
+/// Get wallet balances (SOL + SPL tokens) via Solana RPC.
+///
+/// Uses `getBalance` for SOL and `getTokenAccountsByOwner` for SPL tokens. The
+/// legacy `api.helius.xyz/v1/wallet` endpoint is deprecated, so the RPC URL is
+/// expected to carry its own auth (e.g. Helius `?api-key=`). SOL price is a
+/// best-effort Jupiter lookup; per-token USD values are not resolved here.
+pub async fn get_wallet_balances(
+    rpc_url: &str,
+    pubkey: &str,
+    _helius_api_key: &str,
+) -> Result<WalletBalances> {
+    let client = reqwest::Client::new();
+    let rpc = if rpc_url.is_empty() {
+        "https://api.mainnet-beta.solana.com"
+    } else {
+        rpc_url
+    };
+
+    // ── SOL balance (lamports) ───────────────────────────────────
+    let Some(sol_result) = rpc_call(&client, rpc, "getBalance", serde_json::json!([pubkey])).await
+    else {
         return Ok(WalletBalances {
             wallet: Some(pubkey.to_string()),
             sol: 0.0,
@@ -360,57 +383,57 @@ pub async fn get_wallet_balances(
             usdc: 0.0,
             tokens: vec![],
             total_usd: 0.0,
-            error: Some(format!("Helius API error: {} {}", status, body)),
+            error: Some("RPC getBalance request failed".to_string()),
         });
+    };
+    let lamports = sol_result
+        .get("value")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let sol_balance = lamports as f64 / 1_000_000_000.0;
+
+    // ── SPL token accounts ───────────────────────────────────────
+    let mut tokens: Vec<TokenBalance> = vec![];
+    let mut usdc_balance = 0.0;
+    let token_result = rpc_call(
+        &client,
+        rpc,
+        "getTokenAccountsByOwner",
+        serde_json::json!([
+            pubkey,
+            { "programId": SPL_TOKEN_PROGRAM },
+            { "encoding": "jsonParsed" }
+        ]),
+    )
+    .await;
+    if let Some(accounts) = token_result
+        .as_ref()
+        .and_then(|r| r.get("value"))
+        .and_then(serde_json::Value::as_array)
+    {
+        for acc in accounts {
+            let info = &acc["account"]["data"]["parsed"]["info"];
+            let mint = info["mint"].as_str().unwrap_or("").to_string();
+            let amount = info["tokenAmount"]["uiAmount"].as_f64().unwrap_or(0.0);
+            if mint.is_empty() || amount <= 0.0 {
+                continue;
+            }
+            if mint == USDC_MINT {
+                usdc_balance = amount;
+            }
+            let symbol = mint.chars().take(8).collect::<String>();
+            tokens.push(TokenBalance {
+                mint,
+                symbol,
+                balance: amount,
+                usd: None,
+            });
+        }
     }
 
-    let data: HeliusBalancesResponse = resp
-        .json()
-        .await
-        .map_err(|e| anyhow!("Failed to parse Helius response: {}", e))?;
-
-    let balances = data.balances.unwrap_or_default();
-
-    // Find SOL and USDC entries
-    let sol_entry = balances
-        .iter()
-        .find(|b| b.mint.as_deref() == Some(SOL_MINT) || b.symbol.as_deref() == Some("SOL"));
-    let usdc_entry = balances.iter().find(|b| {
-        b.mint.as_deref() == Some("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")
-            || b.symbol.as_deref() == Some("USDC")
-    });
-
-    let sol_balance = sol_entry.as_ref().and_then(|e| e.balance).unwrap_or(0.0);
-    let sol_price = sol_entry
-        .as_ref()
-        .and_then(|e| e.price_per_token)
-        .unwrap_or(0.0);
-    let sol_usd = sol_entry.as_ref().and_then(|e| e.usd_value).unwrap_or(0.0);
-    let usdc_balance = usdc_entry.as_ref().and_then(|e| e.balance).unwrap_or(0.0);
-
-    // Map all tokens
-    let tokens: Vec<TokenBalance> = balances
-        .into_iter()
-        .map(|b| {
-            let mint_str = b.mint.unwrap_or_default();
-            let symbol = b
-                .symbol
-                .or_else(|| {
-                    if mint_str.is_empty() {
-                        None
-                    } else {
-                        Some(mint_str.chars().take(8).collect::<String>())
-                    }
-                })
-                .unwrap_or_else(|| "unknown".to_string());
-            TokenBalance {
-                mint: mint_str,
-                symbol,
-                balance: b.balance.unwrap_or(0.0),
-                usd: b.usd_value.map(|v| round(v, 2)),
-            }
-        })
-        .collect();
+    // ── SOL price (best-effort) ──────────────────────────────────
+    let sol_price = get_sol_price().await.unwrap_or(0.0);
+    let sol_usd = sol_balance * sol_price;
 
     Ok(WalletBalances {
         wallet: Some(pubkey.to_string()),
@@ -419,7 +442,7 @@ pub async fn get_wallet_balances(
         sol_usd: round(sol_usd, 2),
         usdc: round(usdc_balance, 2),
         tokens,
-        total_usd: round(data.total_usd_value.unwrap_or(0.0), 2),
+        total_usd: round(sol_usd + usdc_balance, 2),
         error: None,
     })
 }
@@ -465,10 +488,48 @@ pub async fn get_sol_price() -> Result<f64> {
 /// In live mode this loads the wallet keypair from `WALLET_PRIVATE_KEY` or
 /// `MERIDIAN_WALLET_PRIVATE_KEY`, signs Jupiter's base64 versioned transaction
 /// locally in Rust, then submits the signed transaction to Jupiter execute.
+/// Resolve an SPL mint's on-chain decimals via `getTokenSupply`. Returns 9 for
+/// native SOL without a round-trip. Used to size swap input amounts correctly —
+/// guessing the wrong decimals produces an order for the wrong quantity.
+pub async fn resolve_mint_decimals(
+    client: &reqwest::Client,
+    config: &Config,
+    mint: &str,
+) -> Result<u32> {
+    if mint == SOL_MINT {
+        return Ok(9);
+    }
+    let rpc_url = config
+        .api
+        .helius_rpc_url
+        .as_deref()
+        .unwrap_or("https://api.mainnet-beta.solana.com");
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getTokenSupply",
+        "params": [mint],
+    });
+    let value: serde_json::Value = client
+        .post(rpc_url)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| anyhow!("getTokenSupply request failed: {}", e))?
+        .json()
+        .await
+        .map_err(|e| anyhow!("getTokenSupply parse failed: {}", e))?;
+    value["result"]["value"]["decimals"]
+        .as_u64()
+        .map(|d| d as u32)
+        .ok_or_else(|| anyhow!("getTokenSupply returned no decimals for {}", mint))
+}
+
 pub async fn swap_token(
     mint: &str,
     amount: f64,
-    _slippage_bps: u32,
+    slippage_bps: u32,
     referral_bps: u32,
     config: &Config,
 ) -> Result<SwapResult> {
@@ -493,16 +554,36 @@ pub async fn swap_token(
     let client = reqwest::Client::new();
     let jupiter_api_key = get_jupiter_api_key(config);
 
-    // Convert amount to smallest unit (9 decimals for SOL)
-    let decimals: u32 = 9;
-    let amount_lamports = (amount * 10f64.powi(decimals as i32)).floor() as u64;
-    let amount_str = amount_lamports.to_string();
+    // The Swap V2 `/order` endpoint only builds a signable transaction when the
+    // `taker` (wallet) is supplied; without it the response is a quote-only
+    // payload with no `transaction`, which surfaced as "order returned no
+    // transaction". Load the signing keypair up front so its pubkey can be the
+    // taker, and reuse the same keypair to sign the order below.
+    let keypair = load_keypair_from_env()
+        .map_err(|e| anyhow!("wallet keypair unavailable for swap: {}", e))?;
+    let taker = keypair.pubkey().to_string();
 
-    // Build order URL
+    // Convert the input amount to the token's smallest unit. The INPUT mint is
+    // what's being sold — on a token→SOL swap that's the base token, not SOL —
+    // so its OWN decimals must be used. Hardcoding 9 (SOL) overstated SPL token
+    // amounts (most are 6 decimals) by 1000×, so Jupiter found no route and
+    // returned no transaction. That made every fee-token auto-swap silently fail.
+    let decimals = resolve_mint_decimals(&client, config, &input_mint)
+        .await
+        .map_err(|e| anyhow!("could not resolve decimals for input mint {}: {}", input_mint, e))?;
+    let amount_base_units = (amount * 10f64.powi(decimals as i32)).floor() as u64;
+    let amount_str = amount_base_units.to_string();
+
+    // Build order URL. Pin an explicit slippage when provided — without
+    // slippageBps thin/volatile fee tokens (e.g. *pump launches) often fail to
+    // route, leaving the token stuck in the wallet instead of swapping to SOL.
     let mut url = format!(
-        "{}/order?inputMint={}&outputMint={}&amount={}",
-        JUPITER_SWAP_V2_API, input_mint, output_mint, amount_str,
+        "{}/order?inputMint={}&outputMint={}&amount={}&taker={}",
+        JUPITER_SWAP_V2_API, input_mint, output_mint, amount_str, taker,
     );
+    if slippage_bps > 0 {
+        url = format!("{}&slippageBps={}", url, slippage_bps);
+    }
 
     let referral_params = get_referral_params(config).map(|(account, configured_bps)| {
         let fee_bps = if (50..=255).contains(&referral_bps) {
@@ -578,27 +659,7 @@ pub async fn swap_token(
 
     tracing::info!("swap_token: order received, request_id={}", request_id);
 
-    let keypair = match load_keypair_from_env() {
-        Ok(keypair) => keypair,
-        Err(e) => {
-            return Ok(SwapResult {
-                success: false,
-                tx: None,
-                input_mint: Some(input_mint),
-                output_mint: Some(output_mint),
-                amount_in: Some(amount_str),
-                amount_out: None,
-                referral_account: referral_params.as_ref().map(|(a, _)| a.clone()),
-                referral_fee_bps_requested: referral_params.as_ref().map(|(_, f)| *f),
-                fee_bps_applied: order.fee_bps,
-                error: Some(format!(
-                    "Swap V2 order ready (request_id={}) but wallet keypair is unavailable for Rust signing: {}",
-                    request_id, e
-                )),
-            });
-        }
-    };
-
+    // Keypair was loaded up front (it supplied the taker); reuse it to sign.
     let signed_tx = match sign_transaction_base64(&unsigned_tx, &keypair) {
         Ok(signed_tx) => signed_tx,
         Err(e) => {
@@ -701,12 +762,27 @@ pub async fn execute_swap(
         });
     }
 
-    let result: JupiterExecuteResponse = exec_resp
+    // Parse leniently: Jupiter's /execute response returns `code` and the
+    // amount-result fields as either strings or numbers depending on the
+    // endpoint version. A strict struct decode failed on number-typed fields
+    // and reported an error for a swap that had already landed on-chain, which
+    // could trigger a duplicate retry. Read into a Value and extract defensively.
+    let raw: serde_json::Value = exec_resp
         .json()
         .await
         .map_err(|e| anyhow!("Failed to parse swap V2 execute response: {}", e))?;
 
-    if result.status.as_deref() == Some("Failed") {
+    let str_or_num = |key: &str| -> Option<String> {
+        raw.get(key).and_then(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .or_else(|| (!v.is_null()).then(|| v.to_string()))
+        })
+    };
+    let status = raw.get("status").and_then(|v| v.as_str());
+    let signature = str_or_num("signature");
+
+    if status == Some("Failed") {
         return Ok(SwapResult {
             success: false,
             tx: None,
@@ -719,23 +795,23 @@ pub async fn execute_swap(
             fee_bps_applied: None,
             error: Some(format!(
                 "Swap failed on-chain: code={}",
-                result.code.unwrap_or_default()
+                str_or_num("code").unwrap_or_default()
             )),
         });
     }
 
     tracing::info!(
         "swap execute: SUCCESS tx={}",
-        result.signature.as_deref().unwrap_or("unknown")
+        signature.as_deref().unwrap_or("unknown")
     );
 
     Ok(SwapResult {
         success: true,
-        tx: result.signature,
+        tx: signature,
         input_mint: None,
         output_mint: None,
-        amount_in: result.input_amount_result,
-        amount_out: result.output_amount_result,
+        amount_in: str_or_num("inputAmountResult"),
+        amount_out: str_or_num("outputAmountResult"),
         referral_account: None,
         referral_fee_bps_requested: None,
         fee_bps_applied: None,
@@ -823,6 +899,22 @@ mod tests {
         let decoded = load_keypair_from_secret(&json).expect("json array keypair should decode");
 
         assert_eq!(decoded.pubkey(), keypair.pubkey());
+    }
+
+    #[test]
+    fn load_keypair_from_solana_cli_file_path_preserves_pubkey() {
+        // Mirrors the Solana CLI id.json format: a JSON array of 64 bytes.
+        let keypair = solana_sdk::signature::Keypair::new();
+        let json =
+            serde_json::to_string(&keypair.to_bytes().to_vec()).expect("serialize keypair bytes");
+        let path = std::env::temp_dir().join(format!("meridian-keypair-{}.json", keypair.pubkey()));
+        std::fs::write(&path, &json).expect("write temp keypair file");
+
+        let decoded = load_keypair_from_secret(&path.to_string_lossy())
+            .expect("keypair file path should decode");
+        assert_eq!(decoded.pubkey(), keypair.pubkey());
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

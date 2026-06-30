@@ -38,7 +38,7 @@ async fn cli_exec(args: &[&str]) -> Result<serde_json::Value> {
         anyhow!(
             "Failed to parse CLI JSON output: {} — stdout: {}",
             e,
-            &stdout[..stdout.len().min(200)]
+            stdout.chars().take(200).collect::<String>()
         )
     })
 }
@@ -117,6 +117,22 @@ pub struct PortfolioResponse {
     pub extra: HashMap<String, serde_json::Value>,
 }
 
+/// Deserialize an optional f64 from either a JSON number or a numeric string.
+/// The Meteora PnL API returns several numeric fields (feePerTvl24h, balancesSol,
+/// token amounts, …) as strings, which a plain `Option<f64>` rejects — failing
+/// the WHOLE response parse and silently zeroing PnL (and thus TP/SL).
+fn de_opt_f64<'de, D>(deserializer: D) -> std::result::Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    })
+}
+
 /// PnL data from Meteora DLMM PnL API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -128,11 +144,23 @@ pub struct PositionPnlData {
     pub upper_bin_id: Option<i32>,
     pub pool_active_bin_id: Option<i32>,
     pub is_out_of_range: Option<bool>,
+    #[serde(default, deserialize_with = "de_opt_f64")]
+    pub min_price: Option<f64>,
+    #[serde(default, deserialize_with = "de_opt_f64")]
+    pub max_price: Option<f64>,
+    #[serde(default, deserialize_with = "de_opt_f64")]
+    pub pool_active_price: Option<f64>,
+    #[serde(default, deserialize_with = "de_opt_f64")]
     pub pnl_usd: Option<f64>,
+    #[serde(default, deserialize_with = "de_opt_f64")]
     pub pnl_sol: Option<f64>,
+    #[serde(default, deserialize_with = "de_opt_f64")]
     pub pnl_pct_change: Option<f64>,
+    #[serde(default, deserialize_with = "de_opt_f64")]
     pub pnl_sol_pct_change: Option<f64>,
+    #[serde(default, deserialize_with = "de_opt_f64")]
     pub created_at: Option<f64>,
+    #[serde(default, deserialize_with = "de_opt_f64")]
     pub fee_per_tvl_24h: Option<f64>,
     #[serde(default)]
     pub unrealized_pnl: Option<UnrealizedPnl>,
@@ -150,7 +178,9 @@ pub struct PositionPnlData {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct UnrealizedPnl {
+    #[serde(default, deserialize_with = "de_opt_f64")]
     pub balances: Option<f64>,
+    #[serde(default, deserialize_with = "de_opt_f64")]
     pub balances_sol: Option<f64>,
     #[serde(default)]
     pub unclaimed_fee_token_x: Option<TokenAmount>,
@@ -162,7 +192,9 @@ pub struct UnrealizedPnl {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenAmount {
+    #[serde(default, deserialize_with = "de_opt_f64")]
     pub amount_sol: Option<f64>,
+    #[serde(default, deserialize_with = "de_opt_f64")]
     pub usd: Option<f64>,
 }
 
@@ -177,7 +209,9 @@ pub struct AllTimeAmounts {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AllTimeTotal {
+    #[serde(default, deserialize_with = "de_opt_f64")]
     pub sol: Option<f64>,
+    #[serde(default, deserialize_with = "de_opt_f64")]
     pub usd: Option<f64>,
 }
 
@@ -244,10 +278,18 @@ pub struct DeployResult {
     pub pool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pool_name: Option<String>,
+    /// Base (non-SOL) token mint, resolved from pool metadata so trackers/UI
+    /// don't fall back to the pool address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_mint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bin_range: Option<BinRange>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub price_range: Option<PriceRange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range_coverage: Option<RangeCoverage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety_checks: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bin_step: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -282,6 +324,63 @@ pub struct BinRange {
 pub struct PriceRange {
     pub min: f64,
     pub max: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RangeCoverage {
+    pub downside_pct: Option<f64>,
+    pub upside_pct: Option<f64>,
+    pub width_pct: Option<f64>,
+    pub active_price: Option<f64>,
+}
+
+fn estimate_range_coverage(
+    active_price: f64,
+    price_range: Option<&PriceRange>,
+) -> Option<RangeCoverage> {
+    let range = price_range?;
+    if !active_price.is_finite() || active_price <= 0.0 || range.min <= 0.0 || range.max <= 0.0 {
+        return None;
+    }
+
+    Some(RangeCoverage {
+        downside_pct: Some(round(
+            ((active_price - range.min) / active_price) * 100.0,
+            4,
+        )),
+        upside_pct: Some(round(
+            ((range.max - active_price) / active_price) * 100.0,
+            4,
+        )),
+        width_pct: Some(round(((range.max - range.min) / range.min) * 100.0, 4)),
+        active_price: Some(round(active_price, 12)),
+    })
+}
+
+fn estimate_price_range(
+    active_price: f64,
+    active_bin: i32,
+    min_bin: i32,
+    max_bin: i32,
+    bin_step: Option<u32>,
+) -> Option<PriceRange> {
+    if !active_price.is_finite() || active_price <= 0.0 {
+        return None;
+    }
+
+    // Meteora DLMM bins move by bin_step bps. The JS SDK uses
+    // getPriceOfBinByBinId; this relative form mirrors it without importing SDK.
+    let step = bin_step.unwrap_or(100) as f64 / 10_000.0;
+    let ratio = 1.0 + step;
+    let min = active_price * ratio.powi(min_bin - active_bin);
+    let max = active_price * ratio.powi(max_bin - active_bin);
+
+    if min.is_finite() && max.is_finite() && min > 0.0 && max > 0.0 {
+        Some(PriceRange { min, max })
+    } else {
+        None
+    }
 }
 
 /// Close position result returned to the LLM.
@@ -422,6 +521,12 @@ pub struct PositionPnlResult {
     pub upper_bin: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_bin: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_price: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_price: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_price: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub age_minutes: Option<i64>,
 }
@@ -773,12 +878,36 @@ pub async fn get_position_pnl(
         lower_bin: pos.lower_bin_id,
         upper_bin: pos.upper_bin_id,
         active_bin: pos.pool_active_bin_id,
+        min_price: pos.min_price,
+        max_price: pos.max_price,
+        active_price: pos.pool_active_price,
         age_minutes,
     })
 }
 
 /// Deploy a new DLMM position (place SOL into a pool).
 ///
+/// Single-position bin cap: the native deploy path can't span more than ~69
+/// bins (the extended multi-account position path isn't implemented).
+const SINGLE_POSITION_BIN_CAP: i64 = 69;
+
+/// Size bins_below so the downside range covers `target_downside_pct` of price
+/// given the pool's bin_step, clamped to the configured [min, max] and the
+/// single-position cap. A bin moves price by `bin_step` bps, so wider-step
+/// pools need fewer bins for the same coverage — this keeps the range
+/// consistent instead of a flat bin count that exits range fast on tight pools.
+/// Falls back to the configured minimum when bin_step is unknown.
+fn coverage_based_bins_below(bin_step: Option<u32>, cfg: &crate::config::types::StrategyConfig) -> i64 {
+    let max_cap = (cfg.max_bins_below as i64).clamp(1, SINGLE_POSITION_BIN_CAP);
+    let min_floor = (cfg.min_bins_below as i64).clamp(1, max_cap);
+    let Some(step) = bin_step.filter(|s| *s > 0) else {
+        return DEFAULT_BINS_BELOW.clamp(min_floor, max_cap);
+    };
+    let step_frac = step as f64 / 10_000.0;
+    let needed = (cfg.target_downside_pct / step_frac).ceil() as i64;
+    needed.clamp(min_floor, max_cap)
+}
+
 /// Since the Meteora DLMM SDK crate is not available in Rust, this function
 /// builds the transaction data that would be needed for deployment. In the
 /// current implementation, it returns a placeholder indicating what would
@@ -793,52 +922,12 @@ pub async fn deploy_position(
 ) -> Result<DeployResult> {
     let pool_address = crate::tools::wallet::normalize_mint(pool_address);
 
-    if is_dry_run(config) {
-        let bins_below_val = bins_below.unwrap_or(DEFAULT_BINS_BELOW);
-        let bins_above_val = bins_above.unwrap_or(0);
-        return Ok(DeployResult {
-            success: false,
-            position: None,
-            pool: Some(pool_address),
-            pool_name: None,
-            bin_range: Some(BinRange {
-                min: 0,
-                max: 0,
-                active: None,
-            }),
-            price_range: None,
-            bin_step: None,
-            base_fee: None,
-            strategy: strategy.map(String::from),
-            wide_range: Some(bins_below_val + bins_above_val > 69),
-            amount_x: Some(0.0),
-            amount_y: Some(amount_sol),
-            txs: None,
-            error: None,
-            note: Some(format!(
-                "DRY RUN — would deploy {:.4} SOL with {} bins below, {} bins above",
-                amount_sol, bins_below_val, bins_above_val,
-            )),
-        });
-    }
-
-    let bins_below_val = bins_below.unwrap_or(DEFAULT_BINS_BELOW);
     let bins_above_val = bins_above.unwrap_or(0);
-    let total_bins = bins_below_val + bins_above_val;
     let strategy_str = strategy.unwrap_or("spot");
-    let is_wide_range = total_bins > 69;
 
-    tracing::info!(
-        "deploy_position: pool={} amount_sol={:.4} bins=[{}, {}] strategy={} wide_range={}",
-        &pool_address[..8.min(pool_address.len())],
-        amount_sol,
-        bins_below_val,
-        bins_above_val,
-        strategy_str,
-        is_wide_range,
-    );
-
-    // ─── Fetch active bin and pool info ──────────────────────────
+    // ─── Fetch active bin and pool info first ─────────────────────
+    // The pool's bin_step drives how wide the bin range is, so resolve it
+    // before sizing bins_below.
     let active_bin = get_active_bin(&pool_address)
         .await
         .unwrap_or(ActiveBinInfo {
@@ -847,6 +936,59 @@ pub async fn deploy_position(
             price_per_lamport: None,
         });
 
+    let pool_meta = get_pool_metadata(&pool_address).await;
+    // Base (non-SOL) token mint from pool metadata. The Meteora API uses
+    // snake_case (`token_x`/`token_y`) while PoolMetadata renames to camelCase,
+    // so the typed fields are empty and the data lands in `extra`. Read the mint
+    // from there; token_x is the base token, token_y the quote (usually SOL).
+    let base_token_mint = pool_meta.as_ref().and_then(|m| {
+        let mint_of = |key: &str| {
+            m.extra
+                .get(key)
+                .and_then(|v| v.get("address"))
+                .and_then(|a| a.as_str())
+                .map(str::to_string)
+        };
+        mint_of("token_x")
+            .filter(|mint| mint != crate::tools::wallet::SOL_MINT)
+            .or_else(|| mint_of("token_y").filter(|mint| mint != crate::tools::wallet::SOL_MINT))
+            .or_else(|| mint_of("token_x"))
+    });
+    // The datapi nests bin_step under `pool_config`; older shapes put it at the
+    // top level. Check both so the range sizing actually sees the real step
+    // instead of silently falling back to a default.
+    let bin_step = pool_meta
+        .as_ref()
+        .and_then(|m| {
+            m.extra.get("bin_step").or_else(|| {
+                m.extra
+                    .get("pool_config")
+                    .and_then(|pc| pc.get("bin_step"))
+            })
+        })
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u32);
+
+    // When the caller doesn't pin bins_below, size it from the pool's bin_step
+    // so the downside range covers a consistent fraction of price
+    // (config.strategy.target_downside_pct) instead of a flat bin count that
+    // goes out-of-range fast on tight, low-bin_step pools.
+    let bins_below_val =
+        bins_below.unwrap_or_else(|| coverage_based_bins_below(bin_step, &config.strategy));
+    let total_bins = bins_below_val + bins_above_val;
+    let is_wide_range = total_bins > 69;
+
+    tracing::info!(
+        "deploy_position: pool={} amount_sol={:.4} bins=[{}, {}] bin_step={:?} strategy={} wide_range={}",
+        &pool_address[..8.min(pool_address.len())],
+        amount_sol,
+        bins_below_val,
+        bins_above_val,
+        bin_step,
+        strategy_str,
+        is_wide_range,
+    );
+
     let min_bin_id = active_bin.bin_id - bins_below_val as i32;
     let max_bin_id = if bins_above_val > 0 {
         active_bin.bin_id + bins_above_val as i32
@@ -854,18 +996,91 @@ pub async fn deploy_position(
         active_bin.bin_id
     };
 
-    // Fetch pool metadata for additional info
-    let pool_meta = get_pool_metadata(&pool_address).await;
-    let bin_step = pool_meta
-        .as_ref()
-        .and_then(|m| m.extra.get("bin_step"))
-        .and_then(|v| v.as_u64())
-        .map(|v| v as u32);
-
     let base_fee = pool_meta
         .as_ref()
         .and_then(|m| m.extra.get("base_fee_percentage"))
         .and_then(|v| v.as_f64());
+
+    let price_range = estimate_price_range(
+        active_bin.price,
+        active_bin.bin_id,
+        min_bin_id,
+        max_bin_id,
+        bin_step,
+    );
+    let range_coverage = estimate_range_coverage(active_bin.price, price_range.as_ref());
+    // Descriptive guardrails for this deploy. The wide-range note is only
+    // relevant when the requested range actually exceeds the native path's
+    // limit (>69 bins); otherwise it's omitted so callers don't misread a
+    // normal deploy as rejected.
+    let mut safety_check_list = vec![
+        "single_side_sol_only".to_string(),
+        "native_path_does_not_initialize_bin_arrays".to_string(),
+    ];
+    if is_wide_range {
+        safety_check_list
+            .push("wide_range_rejected_until_extended_position_path_exists".to_string());
+    }
+    let safety_checks = Some(safety_check_list);
+
+    if is_dry_run(config) {
+        return Ok(DeployResult {
+            success: false,
+            position: None,
+            pool: Some(pool_address),
+            pool_name: pool_meta.as_ref().and_then(|m| m.name.clone()),
+            base_mint: base_token_mint.clone(),
+            bin_range: Some(BinRange {
+                min: min_bin_id,
+                max: max_bin_id,
+                active: Some(active_bin.bin_id),
+            }),
+            price_range,
+            range_coverage,
+            safety_checks: safety_checks.clone(),
+            bin_step,
+            base_fee,
+            strategy: Some(strategy_str.to_string()),
+            wide_range: Some(is_wide_range),
+            amount_x: Some(0.0),
+            amount_y: Some(amount_sol),
+            txs: None,
+            error: None,
+            note: Some(format!(
+                "DRY RUN OK (simulated, not broadcast): all safety checks passed; would deploy \
+                 {:.4} SOL with {} bins below, {} bins above. This is a successful simulation — \
+                 no transaction was submitted.",
+                amount_sol, bins_below_val, bins_above_val,
+            )),
+        });
+    }
+
+    if is_wide_range {
+        return Ok(DeployResult {
+            success: false,
+            position: None,
+            pool: Some(pool_address),
+            pool_name: pool_meta.as_ref().and_then(|m| m.name.clone()),
+            base_mint: base_token_mint.clone(),
+            bin_range: Some(BinRange {
+                min: min_bin_id,
+                max: max_bin_id,
+                active: Some(active_bin.bin_id),
+            }),
+            price_range,
+            range_coverage,
+            safety_checks: safety_checks.clone(),
+            bin_step,
+            base_fee,
+            strategy: Some(strategy_str.to_string()),
+            wide_range: Some(true),
+            amount_x: Some(0.0),
+            amount_y: Some(amount_sol),
+            txs: None,
+            error: Some("Wide-range deploy (>69 bins) is not enabled in the Rust native path yet. JS original uses createExtendedEmptyPosition + addLiquidityByStrategyChunkable; refusing unsafe one-shot deploy.".to_string()),
+            note: None,
+        });
+    }
 
     match crate::tools::meteora_native::deploy_position(
         &pool_address,
@@ -889,12 +1104,15 @@ pub async fn deploy_position(
                 position: Some(result.position_address),
                 pool: Some(pool_address),
                 pool_name: pool_meta.as_ref().and_then(|m| m.name.clone()),
+                base_mint: base_token_mint.clone(),
                 bin_range: Some(BinRange {
                     min: min_bin_id,
                     max: max_bin_id,
                     active: Some(active_bin.bin_id),
                 }),
-                price_range: None,
+                price_range: price_range.clone(),
+                range_coverage: range_coverage.clone(),
+                safety_checks: safety_checks.clone(),
                 bin_step,
                 base_fee,
                 strategy: Some(strategy_str.to_string()),
@@ -913,12 +1131,15 @@ pub async fn deploy_position(
                 position: None,
                 pool: Some(pool_address),
                 pool_name: pool_meta.as_ref().and_then(|m| m.name.clone()),
+                base_mint: base_token_mint.clone(),
                 bin_range: Some(BinRange {
                     min: min_bin_id,
                     max: max_bin_id,
                     active: Some(active_bin.bin_id),
                 }),
-                price_range: None,
+                price_range,
+                range_coverage,
+                safety_checks,
                 bin_step,
                 base_fee,
                 strategy: Some(strategy_str.to_string()),
@@ -970,25 +1191,34 @@ pub async fn close_position(
     match crate::tools::meteora_native::close_position(&position_address, config, None).await {
         Ok(result) => {
             tracing::info!(
-                "native close_position result: signature={} remove_x={} remove_y={} fee_x={} fee_y={} rewards={:?}",
+                "native close_position result: signature={} unwrap={} remove_x={} remove_y={} fee_x={} fee_y={} rewards={:?}",
                 result.signature,
+                result.unwrap_signature.as_deref().unwrap_or("none"),
                 result.remove_liquidity_amount_x,
                 result.remove_liquidity_amount_y,
                 result.claimable_fee_x,
                 result.claimable_fee_y,
                 result.claimable_rewards,
             );
+            // Surface both the close and the wSOL-unwrap sweep (when present) so
+            // the dashboard shows the full chain of on-chain actions.
+            let mut signatures = vec![result.signature.clone()];
+            if let Some(unwrap_sig) = result.unwrap_signature.clone() {
+                signatures.push(unwrap_sig);
+            }
             Ok(CloseResult {
                 success: true,
                 position: Some(position_address),
                 pool: None,
                 pool_name: None,
                 claim_txs: None,
-                close_txs: Some(vec![result.signature.clone()]),
-                txs: Some(vec![result.signature]),
+                close_txs: Some(signatures.clone()),
+                txs: Some(signatures),
                 pnl_usd: None,
                 pnl_pct: None,
-                base_mint: None,
+                // Surface the pool's base mint so the close caller (executor
+                // auto-swap / CLI) can swap claimed base-token fees back to SOL.
+                base_mint: result.base_mint,
                 error: None,
             })
         }
@@ -1114,6 +1344,7 @@ pub async fn search_pools(query: &str, limit: Option<usize>) -> Result<SearchPoo
             bin_step: p
                 .get("bin_step")
                 .or_else(|| p.get("dlmm_params").and_then(|dp| dp.get("bin_step")))
+                .or_else(|| p.get("pool_config").and_then(|pc| pc.get("bin_step")))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as u16),
             fee_pct: p
@@ -1307,9 +1538,196 @@ async fn get_pool_metadata(pool_address: &str) -> Option<PoolMetadata> {
     resp.json::<PoolMetadata>().await.ok()
 }
 
+/// Aggregated closed-position history for one pool (for the portfolio view).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolHistory {
+    pub pool: String,
+    pub pool_name: String,
+    pub pnl_usd: f64,
+    pub deposit_usd: f64,
+    pub withdraw_usd: f64,
+    pub fees_usd: f64,
+    pub closed_count: usize,
+    pub win_count: usize,
+}
+
+/// Every pool the wallet has EVER held a position in (open + closed), straight
+/// from Meteora's `/portfolio` endpoint — the same source as the official UI.
+/// The portfolio summary must use this (not the bot's tracked state) so it
+/// counts every position, including ones the bot never tracked (e.g. orphans
+/// from restarts). Returns (pool_address, display_name) pairs.
+pub async fn get_all_wallet_pools(wallet: &str) -> Vec<(String, String)> {
+    let client = make_client();
+    let url = format!("{}/portfolio?user={}", METEORA_DLMM_API, wallet);
+    let resp = match client.get(&url).send().await {
+        Ok(r) if r.status().is_success() => r,
+        _ => return Vec::new(),
+    };
+    let val: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let pools = val
+        .get("pools")
+        .and_then(|p| p.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for p in &pools {
+        let addr = p
+            .get("poolAddress")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if addr.is_empty() {
+            continue;
+        }
+        // `tokenX` is the base-token symbol string (e.g. "Bepe").
+        let name = p
+            .get("tokenX")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("{}-SOL", s))
+            .unwrap_or_default();
+        out.push((addr, name));
+    }
+    out
+}
+
+/// Fetch and aggregate a wallet's CLOSED positions for one pool from the Meteora
+/// PnL API. Returns None if the pool has no closed positions for the wallet.
+pub async fn get_pool_history(pool: &str, pool_name: &str, wallet: &str) -> Option<PoolHistory> {
+    let client = make_client();
+    let url = format!(
+        "{}/positions/{}/pnl?user={}&status=closed&pageSize=100&page=1",
+        METEORA_DLMM_API, pool, wallet,
+    );
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let data: PnlPoolResponse = resp.json().await.ok()?;
+    let positions = data.positions.unwrap_or_default();
+    if positions.is_empty() {
+        return None;
+    }
+    let total_usd = |a: &Option<AllTimeAmounts>| {
+        a.as_ref()
+            .and_then(|x| x.total.as_ref())
+            .and_then(|t| t.usd)
+            .unwrap_or(0.0)
+    };
+    let mut history = PoolHistory {
+        pool: pool.to_string(),
+        pool_name: pool_name.to_string(),
+        ..Default::default()
+    };
+    for pos in &positions {
+        let pnl = pos.pnl_usd.unwrap_or(0.0);
+        history.pnl_usd += pnl;
+        history.deposit_usd += total_usd(&pos.all_time_deposits);
+        history.withdraw_usd += total_usd(&pos.all_time_withdrawals);
+        history.fees_usd += total_usd(&pos.all_time_fees);
+        history.closed_count += 1;
+        if pnl > 0.0 {
+            history.win_count += 1;
+        }
+    }
+    Some(history)
+}
+
+/// Sum a pool's CURRENTLY-OPEN positions' unrealized PnL (USD) for the wallet,
+/// from Meteora's PnL API (status=open). Mirrors `get_pool_history` but for the
+/// live side, so the portfolio headline can match Meteora's realtime total
+/// (closed realized + open unrealized) instead of closed-only. Returns 0.0 on
+/// any API/parse failure (degrade gracefully).
+pub async fn get_pool_open_pnl(pool: &str, wallet: &str) -> f64 {
+    let client = make_client();
+    let url = format!(
+        "{}/positions/{}/pnl?user={}&status=open&pageSize=100&page=1",
+        METEORA_DLMM_API, pool, wallet,
+    );
+    let Ok(resp) = client.get(&url).send().await else {
+        return 0.0;
+    };
+    if !resp.status().is_success() {
+        return 0.0;
+    }
+    let Ok(data) = resp.json::<PnlPoolResponse>().await else {
+        return 0.0;
+    };
+    data.positions
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|p| p.pnl_usd)
+        .sum()
+}
+
+/// Best-effort fetch of a pool's display name (e.g. "drooling-SOL").
+pub async fn get_pool_name(pool_address: &str) -> Option<String> {
+    get_pool_metadata(pool_address)
+        .await
+        .and_then(|meta| meta.name)
+        .filter(|name| !name.is_empty())
+}
+
+/// Best-effort fetch of a token's icon URL (the same IPFS image Meteora shows),
+/// via the pool-discovery search API keyed by mint. Returns None on any miss.
+pub async fn get_token_icon(mint: &str) -> Option<String> {
+    let client = make_client();
+    let url = format!("{}/pools?query={}&limit=1", METEORA_POOL_DISCOVERY_API, mint);
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let value: serde_json::Value = resp.json().await.ok()?;
+    for pool in value.get("data")?.as_array()? {
+        for key in ["token_x", "token_y"] {
+            let token = match pool.get(key) {
+                Some(token) => token,
+                None => continue,
+            };
+            if token.get("address").and_then(|a| a.as_str()) == Some(mint) {
+                if let Some(icon) = token.get("icon").and_then(|i| i.as_str()) {
+                    if !icon.is_empty() {
+                        return Some(icon.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coverage_based_bins_scales_with_bin_step() {
+        // min 15, max 50 (capped at 69), target 40% downside.
+        let cfg = crate::config::types::StrategyConfig {
+            min_bins_below: 15,
+            max_bins_below: 50,
+            min_safe_bins_below: 35,
+            target_downside_pct: 0.40,
+        };
+
+        // bin_step 100 (1%): 40% / 1% = 40 bins.
+        assert_eq!(coverage_based_bins_below(Some(100), &cfg), 40);
+        // bin_step 250 (2.5%): 40% / 2.5% = 16 bins.
+        assert_eq!(coverage_based_bins_below(Some(250), &cfg), 16);
+        // bin_step 20 (0.2%): 40% / 0.2% = 200 bins -> clamped to max 50.
+        assert_eq!(coverage_based_bins_below(Some(20), &cfg), 50);
+        // bin_step 1000 (10%): 40% / 10% = 4 bins -> clamped up to min 15.
+        assert_eq!(coverage_based_bins_below(Some(1000), &cfg), 15);
+        // unknown bin_step -> falls back to DEFAULT_BINS_BELOW, clamped.
+        assert_eq!(
+            coverage_based_bins_below(None, &cfg),
+            DEFAULT_BINS_BELOW.clamp(15, 50)
+        );
+    }
 
     struct EnvGuard {
         saved: Vec<(&'static str, Option<String>)>,
@@ -1358,6 +1776,14 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("DRY RUN"));
+        let safety_checks = deploy.safety_checks.as_ref().expect("safety checks");
+        assert!(safety_checks.contains(&"single_side_sol_only".to_string()));
+        assert!(safety_checks.contains(&"native_path_does_not_initialize_bin_arrays".to_string()));
+        // 35 bins is within the native path's limit, so the wide-range note must
+        // NOT appear — callers should not see a normal deploy as rejected.
+        assert!(!safety_checks
+            .contains(&"wide_range_rejected_until_extended_position_path_exists".to_string()));
+        assert_eq!(deploy.wide_range, Some(false));
 
         let close = close_position(position, Some("test dry-run"), &config)
             .await
@@ -1434,7 +1860,11 @@ mod tests {
 
     #[tokio::test]
     async fn deploy_live_path_uses_native_meteora_before_js_cli() {
-        let _guard = EnvGuard::clear(&["WALLET_PRIVATE_KEY", "MERIDIAN_WALLET_PRIVATE_KEY"]);
+        let _guard = EnvGuard::clear(&[
+            "DRY_RUN",
+            "WALLET_PRIVATE_KEY",
+            "MERIDIAN_WALLET_PRIVATE_KEY",
+        ]);
         let pool = "22222222222222222222222222222222";
         let config = Config {
             dry_run: false,

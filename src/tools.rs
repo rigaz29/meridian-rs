@@ -1,10 +1,12 @@
 pub mod agent_meridian;
 pub mod blacklist;
+pub mod bollinger;
 pub mod chart_indicators;
 pub mod definitions;
 pub mod discord_signals;
 pub mod dlmm;
 pub mod executor;
+pub mod gmgn;
 pub mod meteora_native;
 pub mod screening;
 pub mod smart_wallets;

@@ -359,6 +359,139 @@ pub fn get_all_tool_definitions() -> Vec<ToolDefinition> {
                 "required": []
             }),
         ),
+        // ── Lessons ────────────────────────────────────────────
+        tool(
+            "add_lesson",
+            "Save a durable lesson the agent should remember in future cycles (PREFER/AVOID/WORKED/FAILED)",
+            json!({
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "The lesson text"},
+                    "role": {"type": "string", "enum": ["manager", "screener", "general"], "description": "Which role the lesson applies to (default general)"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags e.g. [\"deploy\",\"close\"]"}
+                },
+                "required": ["content"]
+            }),
+        ),
+        tool(
+            "list_lessons",
+            "List saved lessons, optionally filtered by role",
+            json!({
+                "type": "object",
+                "properties": {
+                    "role": {"type": "string", "enum": ["manager", "screener", "general"], "description": "Filter by role"},
+                    "limit": {"type": "integer", "description": "Max lessons to return (default 50)"}
+                },
+                "required": []
+            }),
+        ),
+        tool(
+            "pin_lesson",
+            "Pin a lesson so it is always injected into the prompt",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "string", "description": "Lesson ID to pin"}},
+                "required": ["id"]
+            }),
+        ),
+        tool(
+            "unpin_lesson",
+            "Unpin a previously pinned lesson",
+            json!({
+                "type": "object",
+                "properties": {"id": {"type": "string", "description": "Lesson ID to unpin"}},
+                "required": ["id"]
+            }),
+        ),
+        tool(
+            "clear_lessons",
+            "Clear all saved lessons (irreversible)",
+            json!({"type": "object", "properties": {}, "required": []}),
+        ),
+        // ── Smart wallets ──────────────────────────────────────
+        tool(
+            "add_smart_wallet",
+            "Track a KOL/alpha wallet so its LP or holding activity becomes a deployment confidence signal",
+            json!({
+                "type": "object",
+                "properties": {
+                    "address": {"type": "string", "description": "Solana wallet address"},
+                    "label": {"type": "string", "description": "Human label for the wallet"},
+                    "category": {"type": "string", "description": "Optional category (e.g. KOL, fund)"},
+                    "type": {"type": "string", "enum": ["lp", "holder"], "description": "lp = check positions (default), holder = check token holdings"}
+                },
+                "required": ["address", "label"]
+            }),
+        ),
+        tool(
+            "list_smart_wallets",
+            "List all tracked smart wallets",
+            json!({"type": "object", "properties": {}, "required": []}),
+        ),
+        tool(
+            "remove_smart_wallet",
+            "Stop tracking a smart wallet",
+            json!({
+                "type": "object",
+                "properties": {"address": {"type": "string", "description": "Wallet address to remove"}},
+                "required": ["address"]
+            }),
+        ),
+        // ── Blacklist / deployer blocklist ─────────────────────
+        tool(
+            "list_blacklist",
+            "List all blacklisted token mints",
+            json!({"type": "object", "properties": {}, "required": []}),
+        ),
+        tool(
+            "remove_from_blacklist",
+            "Remove a token mint from the blacklist",
+            json!({
+                "type": "object",
+                "properties": {"mint": {"type": "string"}},
+                "required": ["mint"]
+            }),
+        ),
+        tool(
+            "block_deployer",
+            "Block a developer/deployer wallet so its pools are hard-filtered before screening",
+            json!({
+                "type": "object",
+                "properties": {
+                    "wallet": {"type": "string", "description": "Deployer wallet to block"},
+                    "reason": {"type": "string"},
+                    "label": {"type": "string"}
+                },
+                "required": ["wallet"]
+            }),
+        ),
+        tool(
+            "list_blocked_deployers",
+            "List all blocked developer/deployer wallets",
+            json!({"type": "object", "properties": {}, "required": []}),
+        ),
+        // ── Pool detail / position note ────────────────────────
+        tool(
+            "get_pool_detail",
+            "Fetch fresh detailed metrics for a single pool (TVL, fee/TVL, volume, organic score, holders, bin step)",
+            json!({
+                "type": "object",
+                "properties": {"pool_address": {"type": "string", "description": "Pool address to inspect"}},
+                "required": ["pool_address"]
+            }),
+        ),
+        tool(
+            "set_position_note",
+            "Attach a standing instruction/note to an open position that the manager must honor next cycle",
+            json!({
+                "type": "object",
+                "properties": {
+                    "position_id": {"type": "string", "description": "Position ID or pool address"},
+                    "note": {"type": "string", "description": "Instruction text (max 280 chars)"}
+                },
+                "required": ["position_id", "note"]
+            }),
+        ),
     ]
 }
 

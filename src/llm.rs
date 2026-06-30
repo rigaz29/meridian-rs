@@ -150,7 +150,7 @@ impl LlmClient {
                             "LLM API {} retrying in {}s: {}",
                             status,
                             wait,
-                            &text[..text.len().min(100)]
+                            text.chars().take(100).collect::<String>()
                         ),
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(wait)).await;

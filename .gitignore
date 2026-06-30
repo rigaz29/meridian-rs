@@ -24,4 +24,5 @@ logs/
 *.log
 
 # Reference (original JS code)
-reference/
+reference/.next
+node_modules

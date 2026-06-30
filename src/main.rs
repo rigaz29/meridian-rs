@@ -11,6 +11,7 @@ mod config;
 mod cycle;
 #[cfg(test)]
 mod docs_quality;
+mod hivemind;
 mod lessons;
 mod llm;
 mod models;
@@ -100,6 +101,108 @@ async fn run_repl_command(
         other => Ok(ReplCommandOutcome::Continue(Some(format!(
             "Unknown command: {other}. Type 'help' for commands."
         )))),
+    }
+}
+
+/// Drop tracked positions that no longer exist on-chain. Runs once at startup
+/// before any cycle can act, so the agent never tries to manage or close a
+/// phantom (failed deploy, leaked dry-run id, or externally-closed) position.
+async fn reconcile_positions_on_chain(
+    positions: &mut PositionState,
+    config: &config::Config,
+    state_path: &str,
+) {
+    let mut changed = 0;
+
+    // ── Prune: drop tracked-active positions that are gone on-chain ──
+    let active_ids: Vec<String> = positions.get_active().iter().map(|p| p.id.clone()).collect();
+    if !active_ids.is_empty() {
+        match tools::meteora_native::existing_positions(config, &active_ids).await {
+            Ok(existing) => {
+                for id in &active_ids {
+                    if !existing.contains(id) && positions.mark_orphaned(id) {
+                        changed += 1;
+                        warn(
+                            "reconcile",
+                            &format!(
+                                "Pruned phantom position {} (not found on-chain)",
+                                &id[..8.min(id.len())]
+                            ),
+                        );
+                    }
+                }
+            }
+            Err(e) => warn("reconcile", &format!("On-chain prune skipped: {e}")),
+        }
+    }
+
+    // ── Adopt: discover on-chain positions the state lost track of ──
+    match tools::meteora_native::discover_wallet_positions(config).await {
+        Ok(discovered) => {
+            for (pos_id, lb_pair) in discovered {
+                if positions.positions.contains_key(&pos_id) {
+                    continue;
+                }
+                let pool_name = tools::dlmm::get_pool_name(&lb_pair).await;
+                let base_mint = tools::meteora_native::pool_base_mint(config, &lb_pair)
+                    .await
+                    .unwrap_or_else(|_| lb_pair.clone());
+                // Capture entry screening signals so restart-adopted positions
+                // still feed the Darwin learner / lessons on close, instead of
+                // landing as hollow stubs with empty signal_snapshot.
+                let em = tools::screening::fetch_entry_metrics(
+                    &lb_pair,
+                    &config.screening.timeframe,
+                )
+                .await
+                .unwrap_or_default();
+                positions.adopt(state::positions::TrackedPosition {
+                    id: pos_id.clone(),
+                    pool_address: lb_pair.clone(),
+                    pool_name: pool_name.clone(),
+                    base_mint,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    volatility: em.volatility,
+                    fee_tvl_ratio: em.fee_tvl_ratio,
+                    organic_score: em.organic_score,
+                    entry_mcap: em.mcap,
+                    entry_tvl: em.tvl,
+                    entry_volume: em.volume,
+                    entry_holders: em.holders,
+                    signal_snapshot: Some(serde_json::json!({
+                        "adopted": true,
+                        "pool": lb_pair,
+                        "organic_score": em.organic_score,
+                        "fee_tvl_ratio": em.fee_tvl_ratio,
+                        "volume": em.volume,
+                        "mcap": em.mcap,
+                        "holder_count": em.holders,
+                        "volatility": em.volatility,
+                    })),
+                    ..Default::default()
+                });
+                changed += 1;
+                info(
+                    "reconcile",
+                    &format!(
+                        "Adopted on-chain position {} in {}",
+                        &pos_id[..8.min(pos_id.len())],
+                        pool_name.as_deref().unwrap_or(&lb_pair)
+                    ),
+                );
+            }
+        }
+        Err(e) => warn("reconcile", &format!("On-chain discovery skipped: {e}")),
+    }
+
+    if changed > 0 {
+        match positions.save(state_path) {
+            Ok(()) => info(
+                "reconcile",
+                &format!("Reconciled state with chain — {changed} change(s)"),
+            ),
+            Err(e) => warn("reconcile", &format!("Failed to persist reconciled state: {e}")),
+        }
     }
 }
 
@@ -198,7 +301,11 @@ async fn main() -> Result<()> {
         }
     }
 
-    let positions = PositionState::load(&state_path)?;
+    let mut positions = PositionState::load(&state_path)?;
+    // Reconcile tracked state against the chain before anything manages it, so a
+    // phantom position (failed/un-landed deploy, leaked dry-run id, or a close
+    // done outside the agent) can never be selected for management or close.
+    reconcile_positions_on_chain(&mut positions, &config, &state_path).await;
     PoolMemoryStore::load(&pool_memory_path)?;
     info(
         "main",
@@ -208,11 +315,34 @@ async fn main() -> Result<()> {
         ),
     );
 
-    // Read wallet address from env or config
-    let wallet_address = std::env::var("MERIDIAN_WALLET").unwrap_or_else(|_| "".to_string());
+    // Wallet address for balance reads: prefer MERIDIAN_WALLET, else derive it
+    // from the signing keypair so the runtime can read its own balance (and thus
+    // screen → deploy) even when MERIDIAN_WALLET isn't set. Without this the
+    // balance read returns 0 and every screening cycle bails with "not enough
+    // SOL" despite a funded wallet.
+    let wallet_address = std::env::var("MERIDIAN_WALLET")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| match tools::meteora_native::wallet_pubkey_from_env() {
+            Ok(pubkey) => {
+                info("main", &format!("Derived wallet address from keypair: {pubkey}"));
+                Some(pubkey)
+            }
+            Err(e) => {
+                warn("main", &format!("Could not derive wallet address: {e}"));
+                None
+            }
+        })
+        .unwrap_or_default();
 
     // ── Graceful shutdown channel ──────────────────────────────
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+    // ── Deploy-on-close signal ─────────────────────────────────
+    // When a management cycle closes a position, wake the screening cycle
+    // immediately instead of waiting for its next interval tick, so freed
+    // capital gets redeployed fast (fee-printing rotation).
+    let redeploy_notify = std::sync::Arc::new(tokio::sync::Notify::new());
 
     // Spawn Ctrl+C handler
     let shutdown_tx_clone = shutdown_tx.clone();
@@ -237,6 +367,29 @@ async fn main() -> Result<()> {
         }
     });
 
+    // ── HiveMind shared-learning sync ──────────────────────────
+    if hivemind::is_enabled(&config.hive_mind) {
+        hivemind::bootstrap(&config.hive_mind).await;
+
+        let hive_config = config.hive_mind.clone();
+        let hive_interval = tokio::time::Duration::from_secs(hivemind::heartbeat_interval_secs());
+        let mut shutdown_hive = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(hive_interval);
+            interval.tick().await; // skip first tick (bootstrap already ran)
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    _ = shutdown_hive.changed() => {
+                        info("hivemind", "Shutdown signal received, stopping HiveMind sync");
+                        break;
+                    }
+                }
+                hivemind::heartbeat_tick(&hive_config).await;
+            }
+        });
+    }
+
     info("main", "Starting cycle scheduler...");
 
     // ── PnL Poller (every 30s, lightweight, no LLM) ───────────
@@ -246,6 +399,8 @@ async fn main() -> Result<()> {
     let state_path_pnl = state_path.clone();
     let wallet_pnl = wallet_address.clone();
     let mut shutdown_pnl = shutdown_rx.clone();
+    let pnl_pool_memory_path = pool_memory_path.clone();
+    let redeploy_notify_pnl = redeploy_notify.clone();
 
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(pnl_interval);
@@ -274,21 +429,89 @@ async fn main() -> Result<()> {
                             info("pnl_poll", &format!("Exit needed: {} — {}", addr, reason));
                         }
 
-                        let queued = queue_pnl_exit_close_instructions(&mut positions, &exits);
-                        info(
-                            "pnl_poll",
-                            &format!(
-                                "Queued {} close instruction(s) for the guarded management flow",
-                                queued
-                            ),
-                        );
-
-                        if let Err(e) = positions.save(&state_path_pnl) {
-                            warn(
-                                "pnl_poll",
-                                &format!("Failed to save queued close instructions: {}", e),
-                            );
+                        // Execute the closes deterministically here (every 30s)
+                        // instead of only queuing an instruction for the 3-min LLM
+                        // management cycle. The LLM sometimes deferred or skipped
+                        // OOR/SL/TP closes ("candidates for closing but action not
+                        // taken"), leaving capital trapped out of range. Closing
+                        // directly via the executor makes exits prompt and certain;
+                        // close_position also auto-claims fees and swaps to SOL.
+                        match PoolMemoryStore::load(&pnl_pool_memory_path) {
+                            Ok(mut pool_memory) => {
+                                let mut executor =
+                                    crate::tools::executor::ToolExecutor::new(&wallet_pnl);
+                                let mut any_closed = false;
+                                for (addr, reason) in &exits {
+                                    let args = serde_json::json!({
+                                        "position_id": addr,
+                                        "reason": format!("auto-close (pnl_poll): {}", reason),
+                                    });
+                                    let call = crate::llm::ToolCall {
+                                        id: "pnl-auto-close".to_string(),
+                                        call_type: "function".to_string(),
+                                        function: crate::llm::FunctionCall {
+                                            name: "close_position".to_string(),
+                                            arguments: args.to_string(),
+                                        },
+                                    };
+                                    let (out, is_err) = executor
+                                        .execute(
+                                            &call,
+                                            &config_pnl,
+                                            &mut positions,
+                                            &mut pool_memory,
+                                        )
+                                        .await;
+                                    if is_err {
+                                        warn(
+                                            "pnl_poll",
+                                            &format!(
+                                                "auto-close {} failed (will retry next poll): {}",
+                                                addr,
+                                                out.chars().take(160).collect::<String>()
+                                            ),
+                                        );
+                                    } else {
+                                        info(
+                                            "pnl_poll",
+                                            &format!("auto-closed {} — {}", addr, reason),
+                                        );
+                                        any_closed = true;
+                                    }
+                                }
+                                let _ = pool_memory.save(&pnl_pool_memory_path);
+                                if any_closed {
+                                    // Freed a slot → wake screening to redeploy now.
+                                    redeploy_notify_pnl.notify_one();
+                                }
+                            }
+                            Err(e) => {
+                                // Fall back to the queued LLM flow if pool memory
+                                // can't be loaded, so exits still get handled.
+                                warn(
+                                    "pnl_poll",
+                                    &format!(
+                                        "pool memory load failed ({}), queuing closes instead",
+                                        e
+                                    ),
+                                );
+                                let queued =
+                                    queue_pnl_exit_close_instructions(&mut positions, &exits);
+                                info(
+                                    "pnl_poll",
+                                    &format!("Queued {} close instruction(s)", queued),
+                                );
+                            }
                         }
+                    }
+
+                    // Persist on EVERY poll, not just when an exit is queued —
+                    // run_pnl_poll updates the OOR timer (mark_oor/mark_in_range)
+                    // each tick. Saving only on exits meant out_of_range_since
+                    // never persisted, so the OOR timer reset every poll and the
+                    // OOR close rule could never reach its wait threshold.
+                    if let Err(e) = positions.save(&state_path_pnl) {
+                        warn("pnl_poll", &format!("Failed to save poll state: {}", e));
                     }
                 }
                 Err(e) => {
@@ -307,6 +530,7 @@ async fn main() -> Result<()> {
     let mgmt_pool_memory_path = pool_memory_path.clone();
     let wallet_mgmt = wallet_address.clone();
     let mut shutdown_mgmt = shutdown_rx.clone();
+    let redeploy_notify_mgmt = redeploy_notify.clone();
 
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(mgmt_interval);
@@ -335,6 +559,15 @@ async fn main() -> Result<()> {
                 }
             };
 
+            // Sync tracked state with the chain before managing: adopt any
+            // on-chain position we lost track of (e.g. a double-deploy whose 2nd
+            // add was dropped) and prune any that closed. Without this, an
+            // untracked position stays invisible on the dashboard and unmanaged
+            // by the bot until restart.
+            reconcile_positions_on_chain(&mut positions, &config_mgmt, &mgmt_state_path).await;
+
+            let active_before = positions.count_active();
+
             match run_management_cycle(
                 &config_mgmt,
                 &llm_mgmt,
@@ -349,11 +582,17 @@ async fn main() -> Result<()> {
                         "mgmt",
                         &format!(
                             "Management cycle complete: {}",
-                            &result[..result.len().min(200)]
+                            result.chars().take(200).collect::<String>()
                         ),
                     );
                     if let Err(e) = positions.save(&mgmt_state_path) {
                         warn("mgmt", &format!("Failed to save state: {}", e));
+                    }
+                    // A position closed this cycle → freed a slot. Wake the
+                    // screening cycle now so capital is redeployed immediately.
+                    if positions.count_active() < active_before {
+                        info("mgmt", "Position closed — triggering immediate screening");
+                        redeploy_notify_mgmt.notify_one();
                     }
                 }
                 Err(e) => {
@@ -372,6 +611,7 @@ async fn main() -> Result<()> {
     let screen_pool_memory_path = pool_memory_path.clone();
     let wallet_screen = wallet_address.clone();
     let mut shutdown_screen = shutdown_rx.clone();
+    let redeploy_notify_screen = redeploy_notify.clone();
 
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(screen_interval);
@@ -379,6 +619,9 @@ async fn main() -> Result<()> {
         loop {
             tokio::select! {
                 _ = interval.tick() => {}
+                _ = redeploy_notify_screen.notified() => {
+                    info("screen", "Redeploy signal received (position closed) — screening now");
+                }
                 _ = shutdown_screen.changed() => {
                     info("screen", "Shutdown signal received, stopping screening cycle");
                     break;
@@ -434,7 +677,7 @@ async fn main() -> Result<()> {
                         "screen",
                         &format!(
                             "Screening cycle complete: {}",
-                            &result[..result.len().min(200)]
+                            result.chars().take(200).collect::<String>()
                         ),
                     );
                 }

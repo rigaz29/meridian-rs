@@ -8,6 +8,7 @@ tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+openssl = { version = "0.10", features = ["vendored"] }
 bs58 = "0.5"
 base64 = "0.22"
 bincode = "1"
@@ -25,9 +26,9 @@ solana-client-v3 = { package = "solana-client", version = "3.1.14" }
 
 # Meteora native SDK adapter
 wp-solana-core = { version = "0.1.1", default-features = false, features = ["rpc", "legacy-wsol-shell"] }
-wp-solana-meteora-dlmm-client = "0.1.1"
-wp-solana-meteora-dlmm-core = "0.1.1"
-wp-solana-meteora-dlmm-sdk = "0.1.1"
+wp-solana-meteora-dlmm-client = "0.1.2"
+wp-solana-meteora-dlmm-core = "0.1.2"
+wp-solana-meteora-dlmm-sdk = "0.1.2"
 wp-solana-rpc = "0.1.1"
 
 # Web Framework

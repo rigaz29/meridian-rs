@@ -21,6 +21,11 @@ pub struct Config {
     #[serde(default)]
     pub jupiter: JupiterConfig,
     #[serde(default)]
+    pub gmgn: GmgnConfig,
+    #[serde(default)]
+    pub hive_mind: HiveMindConfig,
+    // Accept both "indicators" and the dashboard/flat-config "chartIndicators".
+    #[serde(default, alias = "chartIndicators")]
     pub indicators: IndicatorsConfig,
     #[serde(default)]
     pub darwin: DarwinConfig,
@@ -195,6 +200,17 @@ pub struct RiskConfig {
     pub cooldown_loss_pct: f64,
     #[serde(default = "default_cooldown_duration")]
     pub cooldown_duration_min: u32,
+    /// Safety exit: once a position's max drawdown hits the trigger, lower its
+    /// take-profit to the (smaller) safety level so a minor rebound banks it.
+    #[serde(default = "default_safety_exit_enabled")]
+    pub safety_exit_enabled: bool,
+    #[serde(default = "default_safety_exit_trigger")]
+    pub safety_exit_trigger_pct: f64,
+    #[serde(default = "default_safety_exit_tp")]
+    pub safety_exit_tp_pct: f64,
+    /// Suppress all exits for positions younger than this (initial-noise guard).
+    #[serde(default = "default_min_position_duration")]
+    pub min_position_duration_min: u32,
 }
 
 fn default_cooldown_loss() -> f64 {
@@ -202,6 +218,18 @@ fn default_cooldown_loss() -> f64 {
 }
 fn default_cooldown_duration() -> u32 {
     60
+}
+fn default_safety_exit_enabled() -> bool {
+    true
+}
+fn default_safety_exit_trigger() -> f64 {
+    -8.0
+}
+fn default_safety_exit_tp() -> f64 {
+    0.0
+}
+fn default_min_position_duration() -> u32 {
+    5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,10 +288,21 @@ pub struct StrategyConfig {
     pub max_bins_below: u32,
     #[serde(default = "default_min_safe_bins")]
     pub min_safe_bins_below: u32,
+    /// Target fraction of downside price the single-side range should cover
+    /// (e.g. 0.40 = 40%). When the caller doesn't pin bins_below explicitly,
+    /// the deploy sizes the bin count from this and the pool's bin_step so the
+    /// range stays consistent across pools instead of going out-of-range fast
+    /// on tight (low-bin_step) pools.
+    #[serde(default = "default_target_downside_pct")]
+    pub target_downside_pct: f64,
 }
 
 fn default_min_safe_bins() -> u32 {
     35
+}
+
+fn default_target_downside_pct() -> f64 {
+    0.40
 }
 
 impl Default for StrategyConfig {
@@ -272,6 +311,7 @@ impl Default for StrategyConfig {
             min_bins_below: 15,
             max_bins_below: 50,
             min_safe_bins_below: 35,
+            target_downside_pct: default_target_downside_pct(),
         }
     }
 }
@@ -346,6 +386,75 @@ fn default_referral_fee_bps() -> u32 {
     50
 }
 
+/// GMGN OpenAPI fee source. Used as the primary `minTokenFeesSol` gate signal,
+/// falling back to pool/Jupiter fees when no API key is configured.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GmgnConfig {
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default = "default_gmgn_base_url")]
+    pub base_url: String,
+    #[serde(default = "default_gmgn_request_delay_ms")]
+    pub request_delay_ms: u64,
+    #[serde(default = "default_gmgn_max_retries")]
+    pub max_retries: u32,
+}
+
+impl Default for GmgnConfig {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            base_url: default_gmgn_base_url(),
+            request_delay_ms: default_gmgn_request_delay_ms(),
+            max_retries: default_gmgn_max_retries(),
+        }
+    }
+}
+
+fn default_gmgn_base_url() -> String {
+    "https://openapi.gmgn.ai".to_string()
+}
+
+fn default_gmgn_request_delay_ms() -> u64 {
+    2500
+}
+
+fn default_gmgn_max_retries() -> u32 {
+    2
+}
+
+/// HiveMind shared-learning sync (Agent Meridian). Pulls shared lessons/presets
+/// and pushes closed-position performance events. Enabled only when both `url`
+/// and `api_key` are set; private keys and wallet balances are never sent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HiveMindConfig {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default = "default_hive_pull_mode")]
+    pub pull_mode: String,
+}
+
+impl Default for HiveMindConfig {
+    fn default() -> Self {
+        Self {
+            url: None,
+            api_key: None,
+            agent_id: None,
+            pull_mode: default_hive_pull_mode(),
+        }
+    }
+}
+
+fn default_hive_pull_mode() -> String {
+    "auto".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndicatorsConfig {
@@ -369,6 +478,11 @@ pub struct IndicatorsConfig {
     pub rsi_overbought: f64,
     #[serde(default)]
     pub require_all_intervals: bool,
+    /// Bollinger %B entry gate: only deploy when the latest 5m %B is >= this
+    /// (price over-extended up → mean-reversion pullback into our below-range LP
+    /// is more likely). Active only when `enabled` is true.
+    #[serde(default = "default_indicator_bb_percent_b_min")]
+    pub bb_percent_b_min: f64,
 }
 
 impl Default for IndicatorsConfig {
@@ -384,6 +498,7 @@ impl Default for IndicatorsConfig {
             rsi_oversold: default_indicator_rsi_oversold(),
             rsi_overbought: default_indicator_rsi_overbought(),
             require_all_intervals: false,
+            bb_percent_b_min: default_indicator_bb_percent_b_min(),
         }
     }
 }
@@ -402,6 +517,9 @@ fn default_indicator_rsi_oversold() -> f64 {
 }
 fn default_indicator_rsi_overbought() -> f64 {
     80.0
+}
+fn default_indicator_bb_percent_b_min() -> f64 {
+    0.8
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -528,6 +646,10 @@ impl Default for Config {
                 stop_loss_pct: None,
                 cooldown_loss_pct: -5.0,
                 cooldown_duration_min: 60,
+                safety_exit_enabled: default_safety_exit_enabled(),
+                safety_exit_trigger_pct: default_safety_exit_trigger(),
+                safety_exit_tp_pct: default_safety_exit_tp(),
+                min_position_duration_min: default_min_position_duration(),
             },
             schedule: ScheduleConfig {
                 management_interval_min: 10,
@@ -550,11 +672,14 @@ impl Default for Config {
                 min_bins_below: 15,
                 max_bins_below: 50,
                 min_safe_bins_below: 35,
+                target_downside_pct: default_target_downside_pct(),
             },
             dual_strategy: DualStrategyConfig::default(),
             tokens: TokensConfig::default(),
             api: ApiConfig::default(),
             jupiter: JupiterConfig::default(),
+            gmgn: GmgnConfig::default(),
+            hive_mind: HiveMindConfig::default(),
             indicators: IndicatorsConfig::default(),
             darwin: DarwinConfig::default(),
         }

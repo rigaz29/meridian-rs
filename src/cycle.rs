@@ -59,8 +59,9 @@ pub struct PositionPnlData {
 #[derive(Debug, Clone)]
 struct ManagementPositionSnapshot {
     id: String,
-    pnl: Option<f64>,
+    pnl_pct: Option<f64>,
     fee_tvl: Option<f64>,
+    unclaimed_fees_usd: Option<f64>,
     instruction: Option<String>,
     upper_bin: i32,
     lower_bin: i32,
@@ -71,7 +72,7 @@ struct ManagementPositionSnapshot {
 #[derive(Debug, Clone)]
 struct PnlPollSnapshot {
     id: String,
-    pnl: Option<f64>,
+    pnl_pct: Option<f64>,
     in_range: bool,
     minutes_out_of_range: u32,
     fee_tvl: Option<f64>,
@@ -86,7 +87,7 @@ fn format_management_action_block(
         "POSITION: {}\n  action: {}\n  pnl_pct: {:.2}% | fee_per_tvl: {:.4}% | bins: [{},{}] active={} | oor: {}m",
         snapshot.id,
         act.as_str(),
-        snapshot.pnl.unwrap_or(0.0),
+        snapshot.pnl_pct.unwrap_or(0.0),
         snapshot.fee_tvl.unwrap_or(0.0),
         snapshot.lower_bin,
         snapshot.upper_bin,
@@ -108,6 +109,13 @@ fn format_management_action_block(
         if !instruction.trim().is_empty() {
             block.push_str(&format!("\n  instruction: {}", instruction));
         }
+    }
+
+    if matches!(act, PositionAction::Claim) {
+        block.push_str(&format!(
+            "\n  claimable_fees_usd: {:.4}",
+            snapshot.unclaimed_fees_usd.unwrap_or(0.0)
+        ));
     }
 
     block
@@ -154,16 +162,18 @@ pub async fn run_management_cycle(
     let mut pos_snapshots: Vec<ManagementPositionSnapshot> = Vec::new();
 
     for p in &active {
-        let mut pnl_sol: Option<f64> = None;
+        let mut pnl_pct: Option<f64> = None;
         let mut fee_tvl: Option<f64> = None;
+        let mut unclaimed_fees_usd: Option<f64> = None;
         let mut active_bin = 0i32;
 
         // Fetch real PnL from Meteora API
         if let Ok(pnl_result) =
             crate::tools::dlmm::get_position_pnl(&p.pool_address, &p.id, wallet_address).await
         {
-            pnl_sol = pnl_result.pnl_usd;
+            pnl_pct = pnl_result.pnl_pct;
             fee_tvl = pnl_result.fee_per_tvl_24h;
+            unclaimed_fees_usd = pnl_result.unclaimed_fee_usd;
             if let Some(ab) = pnl_result.active_bin {
                 active_bin = ab;
             }
@@ -178,8 +188,9 @@ pub async fn run_management_cycle(
 
         pos_snapshots.push(ManagementPositionSnapshot {
             id: p.id.clone(),
-            pnl: pnl_sol,
+            pnl_pct,
             fee_tvl,
+            unclaimed_fees_usd,
             instruction: p.instruction.clone(),
             upper_bin: p.upper_bin,
             lower_bin: p.lower_bin,
@@ -190,7 +201,7 @@ pub async fn run_management_cycle(
 
     // Update trailing state for each position
     for snapshot in &pos_snapshots {
-        if let Some(pnl) = snapshot.pnl {
+        if let Some(pnl) = snapshot.pnl_pct {
             if let Some(pos) = positions.positions.get_mut(&snapshot.id) {
                 update_trailing_state(
                     pos,
@@ -238,7 +249,14 @@ pub async fn run_management_cycle(
             continue;
         }
         // Deterministic close rules
-        if let (Some(pnl), Some(fee_tvl)) = (snapshot.pnl, snapshot.fee_tvl) {
+        if let Some(fees) = snapshot.unclaimed_fees_usd {
+            if fees >= config.management.min_claim_amount {
+                action_map.insert(snapshot.id.clone(), PositionAction::Claim);
+                continue;
+            }
+        }
+
+        if let (Some(pnl), Some(fee_tvl)) = (snapshot.pnl_pct, snapshot.fee_tvl) {
             if let Some(pos) = positions.positions.get(&snapshot.id) {
                 if let Some(rule) = get_deterministic_close_rule(
                     pos,
@@ -251,6 +269,7 @@ pub async fn run_management_cycle(
                     let (rule_num, reason) = match rule {
                         CloseRule::StopLoss => (1u8, "stop loss"),
                         CloseRule::TakeProfit => (2, "take profit"),
+                        CloseRule::SafetyExit => (2, "safety exit (breakeven after drawdown)"),
                         CloseRule::PumpedAboveRange => (3, "pumped far above range"),
                         CloseRule::OutOfRange => (4, "OOR"),
                         CloseRule::LowYield => (5, "low yield"),
@@ -343,7 +362,7 @@ pub async fn run_management_cycle(
 
     info(
         "cycle",
-        &format!("Management result: {}", &result[..result.len().min(300)]),
+        &format!("Management result: {}", result.chars().take(300).collect::<String>()),
     );
     Ok(result)
 }
@@ -357,6 +376,23 @@ pub async fn run_pnl_poll(
     positions: &mut PositionState,
     wallet_address: &str,
 ) -> Result<Vec<(String, String)>> {
+    let active_ids: Vec<String> = positions.get_active().iter().map(|p| p.id.clone()).collect();
+    if active_ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Self-heal: mark any tracked-active position that's already gone on-chain as
+    // closed. A position closed by a prior exit (or externally) otherwise stays
+    // "active" in state until the next restart and shows stuck on the dashboard.
+    if let Ok(existing) = crate::tools::meteora_native::existing_positions(config, &active_ids).await
+    {
+        for id in &active_ids {
+            if !existing.contains(id) {
+                positions.mark_orphaned(id);
+            }
+        }
+    }
+
     let active = positions.get_active();
     if active.is_empty() {
         return Ok(vec![]);
@@ -365,17 +401,19 @@ pub async fn run_pnl_poll(
     // Fetch real PnL + active_bin for each position
     let mut pos_data: Vec<PnlPollSnapshot> = Vec::new();
     for p in &active {
-        let mut pnl_sol: Option<f64> = None;
+        let mut pnl_pct: Option<f64> = None;
         let mut fee_tvl: Option<f64> = None;
         let mut active_bin = 0i32;
+        let mut pnl_in_range: Option<bool> = None;
 
         // Fetch real PnL
         if let Ok(pnl_result) =
             crate::tools::dlmm::get_position_pnl(&p.pool_address, &p.id, wallet_address).await
         {
-            // Use pnl_usd as proxy; convert via config sol price if available
-            pnl_sol = pnl_result.pnl_usd;
+            pnl_pct = pnl_result.pnl_pct;
             fee_tvl = pnl_result.fee_per_tvl_24h;
+            // Authoritative in-range flag from the API (isOutOfRange).
+            pnl_in_range = pnl_result.in_range;
             // Also try to get active_bin from PnL response
             if let Some(ab) = pnl_result.active_bin {
                 active_bin = ab;
@@ -387,11 +425,14 @@ pub async fn run_pnl_poll(
             active_bin = bin_result.bin_id;
         }
 
-        let in_range = active_bin >= p.lower_bin && active_bin <= p.upper_bin;
+        // Prefer the API's isOutOfRange flag; fall back to a bin comparison only
+        // when it's unavailable. (The stored bins are relative and active_bin is
+        // unreliable here, so the manual comparison alone mis-reported in-range.)
+        let in_range = pnl_in_range.unwrap_or(active_bin >= p.lower_bin && active_bin <= p.upper_bin);
 
         pos_data.push(PnlPollSnapshot {
             id: p.id.clone(),
-            pnl: pnl_sol,
+            pnl_pct,
             in_range,
             minutes_out_of_range: minutes_out_of_range(p),
             fee_tvl,
@@ -403,7 +444,7 @@ pub async fn run_pnl_poll(
 
     for snapshot in &pos_data {
         // Update trailing state
-        if let Some(pnl) = snapshot.pnl {
+        if let Some(pnl) = snapshot.pnl_pct {
             if let Some(pos) = positions.positions.get_mut(&snapshot.id) {
                 update_trailing_state(
                     pos,
@@ -429,7 +470,7 @@ pub async fn run_pnl_poll(
         }
 
         // Check deterministic close rules
-        if let Some(pnl) = snapshot.pnl {
+        if let Some(pnl) = snapshot.pnl_pct {
             let fee_tvl = snapshot.fee_tvl.unwrap_or(0.001);
             if let Some(pos) = positions.positions.get(&snapshot.id) {
                 if let Some(rule) = get_deterministic_close_rule(
@@ -443,6 +484,7 @@ pub async fn run_pnl_poll(
                     let reason = match rule {
                         CloseRule::StopLoss => "stop loss",
                         CloseRule::TakeProfit => "take profit",
+                        CloseRule::SafetyExit => "safety exit (breakeven after drawdown)",
                         CloseRule::PumpedAboveRange => "pumped far above range",
                         CloseRule::OutOfRange => "OOR",
                         CloseRule::LowYield => "low yield",
@@ -497,10 +539,20 @@ fn build_screening_goal(
     active_count: usize,
     active_strategy: Option<&crate::strategy_library::StrategyEntry>,
 ) -> String {
-    let base = format!(
-        "Screen Meteora DLMM pools and deploy {:.4} SOL to the best candidate.          Active positions: {}. Max: {}.          Use get_top_candidates, then call deploy_position with amount_y={:.4}.          Deploy ONLY if a candidate passes ALL thresholds.",
-        deploy_amount, active_count, config.risk.max_positions, deploy_amount,
-    );
+    let slots = (config.risk.max_positions as usize).saturating_sub(active_count);
+    let base = if slots > 1 {
+        // Fill every open slot in a single cycle so capital isn't left idle
+        // waiting for the next tick (important for fast fee-printing rotation).
+        format!(
+            "Screen Meteora DLMM pools and fill up to {} open position slots, deploying {:.4} SOL to EACH of the best {} DISTINCT candidates (different pools and different base tokens).          Active positions: {}. Max: {}.          BE FAST: call get_top_candidates ONCE, then immediately call deploy_position once per candidate with amount_y={:.4} until all {} slots are filled or no more candidates pass. The candidates already passed every screening filter — do NOT do extra per-token research or analysis.          Deploy ONLY candidates that pass ALL thresholds — never the same pool or token twice.",
+            slots, deploy_amount, slots, active_count, config.risk.max_positions, deploy_amount, slots,
+        )
+    } else {
+        format!(
+            "Screen Meteora DLMM pools and deploy {:.4} SOL to the best candidate.          Active positions: {}. Max: {}.          BE FAST: call get_top_candidates ONCE, then immediately call deploy_position with amount_y={:.4}. The candidates already passed every screening filter — do NOT do extra per-token research or analysis.          Deploy ONLY if a candidate passes ALL thresholds.",
+            deploy_amount, active_count, config.risk.max_positions, deploy_amount,
+        )
+    };
 
     if let Some(strategy) = active_strategy {
         format!("{}\n{}", base, strategy.prompt_summary())
@@ -529,11 +581,29 @@ pub async fn run_screening_cycle(
         return Ok(msg);
     }
 
-    let deploy_amount = compute_deploy_amount(config, wallet_sol);
+    let mut deploy_amount = compute_deploy_amount(config, wallet_sol);
     if deploy_amount <= 0.0 {
-        let msg = format!("Not enough SOL ({:.2}) to deploy.", wallet_sol);
-        info("cycle", &msg);
-        return Ok(msg);
+        if config.dry_run {
+            // Dry-run does not require real balance: simulate with the configured
+            // deploy size so the full screen → decide → simulated-deploy flow runs.
+            // The deploy transaction itself stays blocked by the dry-run guard.
+            deploy_amount = if config.management.deploy_amount_sol > 0.0 {
+                config.management.deploy_amount_sol
+            } else {
+                0.5
+            };
+            info(
+                "cycle",
+                &format!(
+                    "DRY_RUN: wallet balance {:.2} SOL is insufficient; simulating deploy amount {:.2} SOL",
+                    wallet_sol, deploy_amount
+                ),
+            );
+        } else {
+            let msg = format!("Not enough SOL ({:.2}) to deploy.", wallet_sol);
+            info("cycle", &msg);
+            return Ok(msg);
+        }
     }
 
     let active_strategy = crate::strategy_library::get_active_strategy()
@@ -563,7 +633,7 @@ pub async fn run_screening_cycle(
 
     info(
         "cycle",
-        &format!("Screening result: {}", &result[..result.len().min(300)]),
+        &format!("Screening result: {}", result.chars().take(300).collect::<String>()),
     );
     Ok(result)
 }
@@ -625,8 +695,9 @@ mod tests {
     fn management_action_block_includes_instruction_text_for_close_queue() {
         let snapshot = ManagementPositionSnapshot {
             id: "Pos111".to_string(),
-            pnl: Some(-4.2),
+            pnl_pct: Some(-4.2),
             fee_tvl: Some(0.0001),
+            unclaimed_fees_usd: Some(0.0),
             instruction: Some("CLOSE: stop loss".to_string()),
             upper_bin: 20,
             lower_bin: 10,

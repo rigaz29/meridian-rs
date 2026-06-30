@@ -3,8 +3,9 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 use crate::config::{meridian_data_path, Config};
-use crate::lessons::LessonStore;
+use crate::lessons::{LessonStore, PerformanceInput};
 use crate::llm::ToolCall;
+use crate::state::pool_memory::PoolDeployInput;
 use crate::state::pool_memory::PoolMemoryStore;
 use crate::state::positions::PositionState;
 use crate::tools::dlmm::{
@@ -16,7 +17,7 @@ use crate::tools::study::study_top_lpers;
 use crate::tools::token::{
     check_smart_wallets_on_pool, get_token_holders, get_token_info, get_token_narrative,
 };
-use crate::tools::wallet::{get_wallet_balances, normalize_mint, swap_token, WalletBalances};
+use crate::tools::wallet::{get_wallet_balances, normalize_mint, swap_token};
 use crate::utils::logger::module::{info, warn};
 
 // ─── Tool Classification ────────────────────────────────────────
@@ -36,18 +37,25 @@ const LOCK_ON_SUCCESS: &[&str] = &["swap_token", "close_position"];
 
 const MAX_DECISION_LOG: usize = 100;
 const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
-const AUTO_SWAP_DUST_USD_THRESHOLD: f64 = 0.10;
-
-#[derive(Debug, Clone, PartialEq)]
-struct AutoSwapPlan {
-    mint: String,
-    symbol: String,
-    amount: f64,
-    usd: f64,
-}
 
 fn json_str<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter().find_map(|key| value.get(*key)?.as_str())
+}
+
+/// Per-session lock key. For deploy_position the key is scoped to the target
+/// pool so the screener can fill several DISTINCT pools in one session (multi-
+/// slot fill) while still being blocked from re-deploying — or retry-spamming —
+/// the SAME pool. All other once-locked tools key on the bare tool name.
+fn lock_key(name: &str, args: &Value) -> String {
+    if name == "deploy_position" {
+        let pool = args
+            .get("pool_address")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        format!("deploy_position:{}", pool)
+    } else {
+        name.to_string()
+    }
 }
 
 fn set_json_string_if_missing(value: &mut Value, key: &str, content: Option<&str>) {
@@ -102,35 +110,6 @@ fn enrich_close_result_with_position_metadata(
     set_json_string_if_missing(result, "poolName", position.pool_name.as_deref());
 }
 
-fn plan_auto_swap_after_close(
-    close_result: &Value,
-    balances: &WalletBalances,
-    skip_swap: bool,
-) -> Option<AutoSwapPlan> {
-    if skip_swap || close_result.get("success").and_then(Value::as_bool) != Some(true) {
-        return None;
-    }
-    let base_mint = json_str(close_result, &["baseMint", "base_mint"])?;
-    let normalized_base = normalize_mint(base_mint);
-    if normalized_base == SOL_MINT {
-        return None;
-    }
-    let token = balances
-        .tokens
-        .iter()
-        .find(|token| normalize_mint(&token.mint) == normalized_base)?;
-    let usd = token.usd.unwrap_or(0.0);
-    if token.balance <= 0.0 || usd < AUTO_SWAP_DUST_USD_THRESHOLD {
-        return None;
-    }
-    Some(AutoSwapPlan {
-        mint: token.mint.clone(),
-        symbol: token.symbol.clone(),
-        amount: token.balance,
-        usd,
-    })
-}
-
 // ─── Decision Log ───────────────────────────────────────────────
 
 const DECISION_LOG_FILE: &str = "decision-log.json";
@@ -146,11 +125,23 @@ pub fn append_decision_log_entry(
     result: &str,
     success: bool,
 ) -> Result<()> {
+    let structured = structured_decision_fields(tool, args, result, success);
     let entry = json!({
         "schemaVersion": 1,
         "id": format!("decision_{}", chrono::Utc::now().timestamp_millis()),
         "timestamp": chrono::Utc::now().to_rfc3339(),
+        "ts": chrono::Utc::now().to_rfc3339(),
         "tool": tool,
+        "type": structured["type"].clone(),
+        "actor": structured["actor"].clone(),
+        "pool": structured["pool"].clone(),
+        "pool_name": structured["pool_name"].clone(),
+        "position": structured["position"].clone(),
+        "summary": structured["summary"].clone(),
+        "reason": structured["reason"].clone(),
+        "risks": structured["risks"].clone(),
+        "metrics": structured["metrics"].clone(),
+        "rejected": structured["rejected"].clone(),
         "args": redact_sensitive_values(args),
         "argsSummary": args_summary(&redact_sensitive_values(args)),
         "success": success,
@@ -158,10 +149,7 @@ pub fn append_decision_log_entry(
         "resultSummary": truncate(result, 200),
     });
 
-    let mut log: Vec<Value> = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|c| serde_json::from_str(&c).ok())
-        .unwrap_or_default();
+    let mut log = read_decision_log_entries(path);
 
     log.push(entry);
 
@@ -175,6 +163,86 @@ pub fn append_decision_log_entry(
     }
     std::fs::write(path, serde_json::to_string_pretty(&log)?)?;
     Ok(())
+}
+
+fn read_decision_log_entries(path: &Path) -> Vec<Value> {
+    let Some(content) = std::fs::read_to_string(path).ok() else {
+        return Vec::new();
+    };
+    if let Ok(entries) = serde_json::from_str::<Vec<Value>>(&content) {
+        return entries;
+    }
+    serde_json::from_str::<Value>(&content)
+        .ok()
+        .and_then(|value| value.get("decisions").and_then(Value::as_array).cloned())
+        .unwrap_or_default()
+}
+
+fn structured_decision_fields(tool: &str, args: &Value, result: &str, success: bool) -> Value {
+    let parsed = parse_result_value(result);
+    let pool = json_str(args, &["pool_address", "pool"])
+        .or_else(|| parsed.get("pool").and_then(Value::as_str));
+    let position = json_str(
+        args,
+        &["position_id", "position_address", "positionAddress"],
+    )
+    .or_else(|| parsed.get("position").and_then(Value::as_str));
+    let pool_name = json_str(args, &["pool_name", "name"]).or_else(|| {
+        parsed
+            .get("poolName")
+            .or_else(|| parsed.get("pool_name"))
+            .and_then(Value::as_str)
+    });
+    let decision_type = match tool {
+        "deploy_position" if success => "deploy",
+        "deploy_position" => "no_deploy",
+        "close_position" => "close",
+        "claim_fees" => "claim",
+        "swap_token" => "swap",
+        _ if success => "note",
+        _ => "skip",
+    };
+    let actor = match tool {
+        "deploy_position" => "SCREENER",
+        "close_position" | "claim_fees" | "swap_token" => "MANAGER",
+        _ => "GENERAL",
+    };
+    let summary = parsed
+        .get("note")
+        .or_else(|| parsed.get("error"))
+        .and_then(Value::as_str)
+        .map(truncate_to_value)
+        .unwrap_or_else(|| Value::String(truncate(result, 200)));
+
+    json!({
+        "type": decision_type,
+        "actor": actor,
+        "pool": pool,
+        "pool_name": pool_name,
+        "position": position,
+        "summary": summary,
+        "reason": parsed.get("error").and_then(Value::as_str).map(truncate_to_value).unwrap_or(Value::Null),
+        "risks": [],
+        "metrics": decision_metrics(tool, args, &parsed),
+        "rejected": [],
+    })
+}
+
+fn decision_metrics(tool: &str, args: &Value, parsed: &Value) -> Value {
+    match tool {
+        "deploy_position" => json!({
+            "amount_sol": args.get("amount_sol").or_else(|| args.get("amount_y")).cloned().unwrap_or(Value::Null),
+            "strategy": args.get("strategy").cloned().unwrap_or(Value::Null),
+            "bin_range": parsed.get("binRange").or_else(|| parsed.get("bin_range")).cloned().unwrap_or(Value::Null),
+            "range_coverage": parsed.get("rangeCoverage").or_else(|| parsed.get("range_coverage")).cloned().unwrap_or(Value::Null),
+            "safety_checks": parsed.get("safetyChecks").or_else(|| parsed.get("safety_checks")).cloned().unwrap_or(Value::Null),
+        }),
+        _ => Value::Object(serde_json::Map::new()),
+    }
+}
+
+fn truncate_to_value(value: &str) -> Value {
+    Value::String(truncate(value, 500))
 }
 
 fn log_decision(tool: &str, args: &Value, result: &str, success: bool) {
@@ -192,10 +260,7 @@ fn recent_decision_limit(raw: Option<u64>) -> usize {
 }
 
 pub fn read_recent_decisions_from_path(path: &Path, limit: usize) -> Result<Vec<Value>> {
-    let log: Vec<Value> = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_default();
+    let log = read_decision_log_entries(path);
     Ok(log.into_iter().rev().take(limit).collect())
 }
 
@@ -226,6 +291,11 @@ fn decision_summary_for_prompt(decision: &Value) -> String {
 
 fn parse_result_value(result: &str) -> Value {
     serde_json::from_str(result).unwrap_or_else(|_| Value::String(truncate(result, 500)))
+}
+
+fn result_succeeded(result: &Value) -> bool {
+    result.get("success").and_then(Value::as_bool) == Some(true)
+        && result.get("error").is_none_or(Value::is_null)
 }
 
 fn redact_sensitive_values(value: &Value) -> Value {
@@ -299,21 +369,19 @@ impl ToolExecutor {
         }
     }
 
-    pub fn is_once_locked(&self, name: &str) -> bool {
-        LOCK_ON_FIRST_ATTEMPT.contains(&name) && self.executed_once.contains(&name.to_string())
+    pub fn is_once_locked(&self, name: &str, args: &Value) -> bool {
+        LOCK_ON_FIRST_ATTEMPT.contains(&name) && self.executed_once.contains(&lock_key(name, args))
     }
 
     /// Lock a tool after execution if it qualifies.
-    pub fn maybe_lock(&mut self, name: &str, success: bool) {
+    pub fn maybe_lock(&mut self, name: &str, args: &Value, success: bool) {
+        let key = lock_key(name, args);
         if LOCK_ON_FIRST_ATTEMPT.contains(&name) {
-            if !self.executed_once.contains(&name.to_string()) {
-                self.executed_once.push(name.to_string());
+            if !self.executed_once.contains(&key) {
+                self.executed_once.push(key);
             }
-        } else if LOCK_ON_SUCCESS.contains(&name)
-            && success
-            && !self.executed_once.contains(&name.to_string())
-        {
-            self.executed_once.push(name.to_string());
+        } else if LOCK_ON_SUCCESS.contains(&name) && success && !self.executed_once.contains(&key) {
+            self.executed_once.push(key);
         }
     }
 
@@ -329,7 +397,7 @@ impl ToolExecutor {
             .unwrap_or(Value::Object(serde_json::Map::new()));
 
         // ── Once-per-session lock ──────────────────────────────
-        if self.is_once_locked(name) {
+        if self.is_once_locked(name, &args) {
             return (
                 format!("Tool {} already executed this session. Skipping.", name),
                 true,
@@ -358,11 +426,11 @@ impl ToolExecutor {
                 let is_ok = !msg.contains("\"success\":false")
                     && !msg.contains("error")
                     && !msg.contains("STUB");
-                self.maybe_lock(name, is_ok);
+                self.maybe_lock(name, &args, is_ok);
                 (msg, false)
             }
             Err(e) => {
-                self.maybe_lock(name, false);
+                self.maybe_lock(name, &args, false);
                 (format!("Tool {} error: {}", name, e), true)
             }
         };
@@ -440,16 +508,26 @@ impl ToolExecutor {
                     );
                 }
 
-                // Duplicate base mint check (if provided)
-                if let Some(base_mint) = args["base_mint"].as_str() {
-                    if !base_mint.is_empty() {
-                        let normalized = normalize_mint(base_mint);
-                        let has_dup = active
-                            .iter()
-                            .any(|p| normalize_mint(&p.base_mint) == normalized);
-                        if has_dup {
-                            anyhow::bail!("already have position with same base token");
-                        }
+                // Duplicate base-token check. The screener usually only passes
+                // pool_address (no base_mint), so resolve the base mint from the
+                // pool when it's absent — otherwise this check silently skips and
+                // the same token gets deployed twice across two different pools.
+                let dup_base_mint = match args["base_mint"].as_str().filter(|m| !m.is_empty()) {
+                    Some(m) => Some(m.to_string()),
+                    None => crate::tools::meteora_native::pool_base_mint(config, pool_addr)
+                        .await
+                        .ok(),
+                };
+                if let Some(base_mint) = dup_base_mint {
+                    let normalized = normalize_mint(&base_mint);
+                    let has_dup = active
+                        .iter()
+                        .any(|p| normalize_mint(&p.base_mint) == normalized);
+                    if has_dup {
+                        anyhow::bail!(
+                            "already have position with same base token {}",
+                            &base_mint[..8.min(base_mint.len())]
+                        );
                     }
                 }
 
@@ -527,6 +605,101 @@ impl ToolExecutor {
                     anyhow::bail!("could not verify pool before deploy");
                 }
 
+                // Bollinger %B entry-timing gate (mean reversion). We deploy SOL
+                // below the active price and only earn when price pulls back DOWN
+                // into our range, so only enter when price is over-extended up
+                // (%B >= threshold). Deploying regardless of price position was a
+                // major bleed source. On data error we allow the deploy (don't
+                // block trading on a transient indicator-API hiccup).
+                if config.indicators.enabled {
+                    // The screener's deploy_position usually only passes
+                    // pool_address (no base_mint), so resolve the base mint from
+                    // the pool when absent — otherwise the gate would silently
+                    // skip and every deploy would be ungated.
+                    let base_mint = match args["base_mint"].as_str().filter(|m| !m.is_empty()) {
+                        Some(m) => Some(m.to_string()),
+                        None => crate::tools::meteora_native::pool_base_mint(config, pool_addr)
+                            .await
+                            .ok(),
+                    };
+                    if let Some(base_mint) = base_mint {
+                        match crate::tools::bollinger::entry_signals(config, &base_mint).await {
+                            Ok(signals) => {
+                                // Volume-trend gate: skip pools whose volume is
+                                // decelerating. In a DLMM, fees come from volume —
+                                // slowing volume is the signal that (per large-sample
+                                // analysis) captures the catastrophic losers, with
+                                // near-zero opportunity cost. Clear thesis, simple rule.
+                                if matches!(
+                                    signals.volume_trend,
+                                    Some(crate::tools::bollinger::VolumeTrend::Decelerating)
+                                ) {
+                                    anyhow::bail!(
+                                        "volume decelerating — skipping (slowing volume drives catastrophic LP losses)"
+                                    );
+                                }
+
+                                // BB %B gate: only enter when price is over-extended
+                                // (pullback into our SOL-below range is more likely).
+                                match signals.percent_b {
+                                    Some(pb) => {
+                                        if pb < config.indicators.bb_percent_b_min {
+                                            anyhow::bail!(
+                                                "BB %B {:.2} < entry min {:.2} — price not over-extended, waiting for mean-reversion setup",
+                                                pb,
+                                                config.indicators.bb_percent_b_min
+                                            );
+                                        }
+                                        info(
+                                            "executor",
+                                            &format!(
+                                                "entry OK — BB %B {:.2} >= {:.2}, volume {}",
+                                                pb,
+                                                config.indicators.bb_percent_b_min,
+                                                signals
+                                                    .volume_trend
+                                                    .map(|t| t.as_str())
+                                                    .unwrap_or("unknown"),
+                                            ),
+                                        );
+                                    }
+                                    None => info(
+                                        "executor",
+                                        "BB %B unavailable (insufficient candles) — allowing deploy",
+                                    ),
+                                }
+                            }
+                            Err(e) => info(
+                                "executor",
+                                &format!("entry signals check skipped (error): {}", e),
+                            ),
+                        }
+                    }
+                }
+
+                // On-chain dedup guard (LAST check — smallest race window).
+                // The tracked-state checks above can be bypassed if two screening
+                // cycles overlap (deploy #1 not yet saved when deploy #2 validates).
+                // This queries the wallet's live on-chain positions and refuses if
+                // ANY already sits in this pool — closing the race for real.
+                match crate::tools::meteora_native::discover_wallet_positions(config).await {
+                    Ok(onchain) => {
+                        if onchain.iter().any(|(_pos, lb_pair)| lb_pair == pool_addr) {
+                            anyhow::bail!(
+                                "on-chain position already exists in pool {} (race guard)",
+                                &pool_addr[..12.min(pool_addr.len())]
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        // Don't hard-fail deploy on a transient RPC hiccup, but log it.
+                        info(
+                            "executor",
+                            &format!("on-chain dedup check skipped (rpc error): {}", e),
+                        );
+                    }
+                }
+
                 Ok(())
             }
             "close_position" => {
@@ -577,13 +750,141 @@ impl ToolExecutor {
         match name {
             "close_position" => {
                 let pid = args["position_id"].as_str().unwrap_or("");
+                let result_value = serde_json::from_str::<Value>(result).unwrap_or(Value::Null);
+                if result_succeeded(&result_value) {
+                    let lookup_id = if pid.is_empty() {
+                        args["position_address"].as_str().unwrap_or("")
+                    } else {
+                        pid
+                    };
+                    if let Some(pos) = find_tracked_position(args, positions).cloned() {
+                        let reason = args["reason"].as_str().unwrap_or("agent decision");
+                        let pnl = pos.pnl_sol.unwrap_or(0.0);
+                        positions.record_close(&pos.id, pnl);
+                        // Persist immediately so the closed position drops off the
+                        // Open tab right away instead of lingering until the
+                        // cycle-end save.
+                        {
+                            let state_path =
+                                std::env::var("MERIDIAN_STATE_PATH").unwrap_or_else(|_| {
+                                    meridian_data_path("meridian-state.json")
+                                        .to_string_lossy()
+                                        .into_owned()
+                                });
+                            if let Err(e) = positions.save(&state_path) {
+                                warn("executor", &format!("close state save failed: {}", e));
+                            }
+                        }
+                        pool_memory.record_deploy(
+                            &pos.pool_address,
+                            PoolDeployInput {
+                                pool_name: pos.pool_name.clone(),
+                                base_mint: Some(pos.base_mint.clone()),
+                                symbol: pos.base_symbol.clone(),
+                                deployed_at: Some(pos.created_at.clone()),
+                                closed_at: Some(chrono::Utc::now().to_rfc3339()),
+                                pnl_pct: pos
+                                    .signal_snapshot
+                                    .as_ref()
+                                    .and_then(|s| s.get("pnlPct"))
+                                    .and_then(Value::as_f64),
+                                fees_earned_sol: Some(pos.total_fees_claimed),
+                                close_reason: Some(reason.to_string()),
+                                strategy: pos
+                                    .signal_snapshot
+                                    .as_ref()
+                                    .and_then(|s| s.get("strategy"))
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string),
+                                entry_mcap: pos.entry_mcap,
+                                entry_tvl: pos.entry_tvl,
+                                entry_volume: pos.entry_volume,
+                                ..Default::default()
+                            },
+                            &config.management,
+                        );
+
+                        let lessons_path = meridian_data_path("lessons.json");
+                        let mut lessons =
+                            LessonStore::load(lessons_path.to_str().unwrap_or("lessons.json"))?;
+                        let signal_snapshot = pos
+                            .signal_snapshot
+                            .as_ref()
+                            .map(Value::to_string)
+                            .unwrap_or_else(|| "{}".to_string());
+                        lessons.record_performance(PerformanceInput {
+                            position_id: &pos.id,
+                            pool: &pos.pool_address,
+                            symbol: pos.base_symbol.as_deref().unwrap_or("unknown"),
+                            pnl_sol: pnl,
+                            fees_earned: pos.total_fees_claimed,
+                            range_efficiency: 0.0,
+                            close_reason: reason,
+                            signal_snapshot: &signal_snapshot,
+                        });
+                        lessons.save(lessons_path.to_str().unwrap_or("lessons.json"))?;
+
+                        // Broadcast the closed-position event to the HiveMind
+                        // (fire-and-forget; failures are logged and non-blocking).
+                        if crate::hivemind::is_enabled(&config.hive_mind) {
+                            let pnl_pct = pos
+                                .signal_snapshot
+                                .as_ref()
+                                .and_then(|s| s.get("pnlPct"))
+                                .and_then(Value::as_f64)
+                                .unwrap_or(0.0);
+                            let strategy = pos
+                                .signal_snapshot
+                                .as_ref()
+                                .and_then(|s| s.get("strategy"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string);
+                            let minutes_held =
+                                chrono::DateTime::parse_from_rfc3339(&pos.created_at)
+                                    .map(|start| {
+                                        (chrono::Utc::now()
+                                            .signed_duration_since(
+                                                start.with_timezone(&chrono::Utc),
+                                            )
+                                            .num_seconds()
+                                            as f64)
+                                            / 60.0
+                                    })
+                                    .unwrap_or(0.0)
+                                    .max(0.0);
+                            let event = crate::hivemind::PerformanceEvent {
+                                event_id: None,
+                                pool: Some(pos.pool_address.clone()),
+                                pool_name: pos.pool_name.clone(),
+                                base_mint: Some(pos.base_mint.clone()),
+                                strategy,
+                                close_reason: Some(reason.to_string()),
+                                pnl_usd: 0.0,
+                                pnl_pct,
+                                fees_earned_usd: pos.total_fees_claimed_usd,
+                                fees_earned_sol: pos.total_fees_claimed,
+                                minutes_held,
+                            };
+                            let hive_config = config.hive_mind.clone();
+                            tokio::spawn(async move {
+                                crate::hivemind::push_performance_event(&hive_config, &event).await;
+                            });
+                        }
+                    } else if !lookup_id.is_empty() {
+                        warn(
+                            "executor",
+                            &format!("close_position succeeded but {} was not tracked", lookup_id),
+                        );
+                    }
+                }
 
                 // Auto-annotate pool memory on low-yield close
                 if result.contains("low yield") || result.contains("LOW_YIELD") {
                     if let Some(pos) = positions.positions.get(pid) {
                         let pool = pos.pool_address.clone();
                         let sym = pos.base_symbol.clone().unwrap_or_default();
-                        let note = "CLOSED low yield — avoid re-entry. Fees insufficient for TVL.".to_string();
+                        let note = "CLOSED low yield — avoid re-entry. Fees insufficient for TVL."
+                            .to_string();
                         pool_memory.add_note(&pool, &pos.base_mint, Some(&sym), &note);
                         info(
                             "executor",
@@ -599,7 +900,11 @@ impl ToolExecutor {
                             // Cooldown pool for 1 hour
                             pool_memory.set_pool_cooldown(&pos.pool_address, "loss_close", 60);
                             // Cooldown token too
-                            pool_memory.set_base_mint_cooldown_minutes(&pos.base_mint, 60, "loss_close");
+                            pool_memory.set_base_mint_cooldown_minutes(
+                                &pos.base_mint,
+                                60,
+                                "loss_close",
+                            );
                             info(
                                 "executor",
                                 &format!("Set 1h cooldown on pool/token after {:.4} SOL loss", pnl),
@@ -629,10 +934,21 @@ impl ToolExecutor {
                     }
                 }
             }
-            "claim_fees"
-                // Auto-swap claimed tokens to SOL if enabled
-                if config.management.sol_mode => {
-                    if let Ok(parsed) = serde_json::from_str::<Value>(result) {
+            "claim_fees" => {
+                if let Ok(parsed) = serde_json::from_str::<Value>(result) {
+                    if result_succeeded(&parsed) {
+                        if let Some(pos) = find_tracked_position(args, positions).cloned() {
+                            let claimed = parsed
+                                .get("claimedSol")
+                                .or_else(|| parsed.get("claimed_sol"))
+                                .or_else(|| parsed.get("amountSol"))
+                                .and_then(Value::as_f64)
+                                .unwrap_or(0.0);
+                            positions.record_claim(&pos.id, claimed);
+                        }
+                    }
+
+                    if config.management.sol_mode {
                         if let Some(base_mint) = parsed["base_mint"].as_str() {
                             let normalized = normalize_mint(base_mint);
                             if normalized != "So11111111111111111111111111111111111111112" {
@@ -647,6 +963,7 @@ impl ToolExecutor {
                         }
                     }
                 }
+            }
             "deploy_position" => {
                 // Record in pool memory
                 if let Some(pool) = args["pool_address"].as_str() {
@@ -664,73 +981,92 @@ impl ToolExecutor {
         Ok(())
     }
 
-    async fn maybe_auto_swap_after_close(
+    async fn maybe_auto_swap_base_to_sol(
         &self,
         close_result: &mut Value,
         skip_swap: bool,
         config: &Config,
     ) -> Result<()> {
-        if !config.management.sol_mode {
+        // Used after BOTH close_position and claim_fees. Unless the caller wants
+        // to keep the token (e.g. a re-seed strategy), swap any claimed/withdrawn
+        // base token back to SOL so capital compounds instead of piling up as
+        // token dust. The balance is read straight from the wallet keypair, so
+        // this works regardless of sol_mode, of a dust USD estimate, or of
+        // whether MERIDIAN_WALLET is set.
+        if skip_swap {
+            return Ok(());
+        }
+        let Some(base_mint) = json_str(close_result, &["baseMint", "base_mint"]).map(str::to_string)
+        else {
+            return Ok(());
+        };
+        if base_mint.is_empty() || normalize_mint(&base_mint) == SOL_MINT {
             return Ok(());
         }
 
-        let rpc = config
-            .api
-            .helius_rpc_url
-            .as_deref()
-            .unwrap_or("https://api.mainnet-beta.solana.com");
-        let helius_key = config.api.helius_api_key.as_deref().unwrap_or("");
-        let balances = match get_wallet_balances(rpc, &self.wallet_address, helius_key).await {
-            Ok(balances) => balances,
-            Err(e) => {
-                if let Some(map) = close_result.as_object_mut() {
-                    map.insert(
-                        "autoSwapError".to_string(),
-                        Value::String(format!("wallet balance check failed: {}", e)),
-                    );
+        let balance =
+            match crate::tools::meteora_native::wallet_token_ui_balance(config, &base_mint).await {
+                Ok(balance) => balance,
+                Err(e) => {
+                    if let Some(map) = close_result.as_object_mut() {
+                        map.insert(
+                            "autoSwapError".to_string(),
+                            Value::String(format!("base-token balance check failed: {}", e)),
+                        );
+                    }
+                    return Ok(());
                 }
-                return Ok(());
-            }
-        };
-
-        let Some(plan) = plan_auto_swap_after_close(close_result, &balances, skip_swap) else {
+            };
+        if balance <= 0.0 {
             return Ok(());
-        };
+        }
 
-        info(
-            "executor",
-            &format!(
-                "Auto-swapping {} (${:.2}) back to SOL after close",
-                plan.symbol, plan.usd
-            ),
-        );
-        match swap_token(&plan.mint, plan.amount, 50, 100, config).await {
-            Ok(swap) => {
-                if let Some(map) = close_result.as_object_mut() {
-                    map.insert("autoSwapped".to_string(), Value::Bool(swap.success));
-                    map.insert(
-                        "autoSwapNote".to_string(),
-                        Value::String(format!(
-                            "Base token already auto-swapped back to SOL ({} → SOL). Do NOT call swap_token again.",
-                            plan.symbol
-                        )),
-                    );
-                    if let Some(tx) = swap.tx {
-                        map.insert("autoSwapTx".to_string(), Value::String(tx));
+        // Retry the swap a few times. Jupiter intermittently returns
+        // "Failed to get quotes" for thin/volatile launch tokens even when a
+        // route exists moments later, which previously left the token unswapped
+        // until the next claim/close swept it. 300 bps (3%) slippage — fee/
+        // withdraw amounts are small and we prefer a filled swap over a tight
+        // price. balance==0 already returned above, so we never delay closes
+        // that produced no base token.
+        let mut last_error: Option<String> = None;
+        for attempt in 1..=3u32 {
+            info(
+                "executor",
+                &format!(
+                    "Auto-swapping {} of {} back to SOL (attempt {}/3)",
+                    balance, base_mint, attempt
+                ),
+            );
+            match swap_token(&base_mint, balance, 300, 100, config).await {
+                Ok(swap) if swap.success => {
+                    if let Some(map) = close_result.as_object_mut() {
+                        map.insert("autoSwapped".to_string(), Value::Bool(true));
+                        if let Some(tx) = swap.tx {
+                            map.insert("autoSwapTx".to_string(), Value::String(tx));
+                        }
+                        if let Some(amount_out) = swap.amount_out {
+                            map.insert("solReceived".to_string(), Value::String(amount_out));
+                        }
                     }
-                    if let Some(amount_out) = swap.amount_out {
-                        map.insert("solReceived".to_string(), Value::String(amount_out));
-                    }
-                    if let Some(error) = swap.error {
-                        map.insert("autoSwapError".to_string(), Value::String(error));
-                    }
+                    return Ok(());
                 }
+                Ok(swap) => {
+                    last_error = swap
+                        .error
+                        .or_else(|| Some("swap returned success=false".to_string()));
+                }
+                Err(e) => last_error = Some(e.to_string()),
             }
-            Err(e) => {
-                if let Some(map) = close_result.as_object_mut() {
-                    map.insert("autoSwapped".to_string(), Value::Bool(false));
-                    map.insert("autoSwapError".to_string(), Value::String(e.to_string()));
-                }
+            if attempt < 3 {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+        // All attempts failed — record the last error. Token stays in the wallet
+        // and the next claim/close on this token will retry the swap.
+        if let Some(map) = close_result.as_object_mut() {
+            map.insert("autoSwapped".to_string(), Value::Bool(false));
+            if let Some(err) = last_error {
+                map.insert("autoSwapError".to_string(), Value::String(err));
             }
         }
         Ok(())
@@ -779,7 +1115,33 @@ impl ToolExecutor {
                     .unwrap_or("https://api.mainnet-beta.solana.com");
                 let helius_key = config.api.helius_api_key.as_deref().unwrap_or("");
                 match get_wallet_balances(rpc, wallet, helius_key).await {
-                    Ok(balances) => Ok(serde_json::to_string_pretty(&balances)?),
+                    Ok(mut balances) => {
+                        // In dry-run, surface a simulated SOL balance when the real
+                        // one is below the deploy threshold so the full flow
+                        // (screen → decide → simulated deploy) can run without funds.
+                        let needed = config.management.deploy_amount_sol
+                            + config.management.gas_reserve
+                            + 0.5;
+                        if config.dry_run && balances.sol < needed {
+                            let simulated = needed.max(1.0);
+                            balances.sol = simulated;
+                            balances.sol_usd = simulated * balances.sol_price;
+                            balances.total_usd = balances.sol_usd;
+                            let mut value = serde_json::to_value(&balances)?;
+                            if let Some(map) = value.as_object_mut() {
+                                map.insert("dryRunSimulated".to_string(), Value::Bool(true));
+                                map.insert(
+                                    "dryRunNote".to_string(),
+                                    Value::String(format!(
+                                        "DRY_RUN: real balance below deploy threshold; reporting a simulated {:.2} SOL so the dry-run flow can proceed. No real funds involved.",
+                                        simulated
+                                    )),
+                                );
+                            }
+                            return Ok(serde_json::to_string_pretty(&value)?);
+                        }
+                        Ok(serde_json::to_string_pretty(&balances)?)
+                    }
                     Err(e) => Ok(format!("{{\"error\": \"{}\"}}", e)),
                 }
             }
@@ -836,7 +1198,12 @@ impl ToolExecutor {
                     .get_top_candidates_with_rejections(&config.screening, limit)
                     .await
                 {
-                    Ok(result) => Ok(serde_json::to_string_pretty(&result)?),
+                    Ok(mut result) => {
+                        self.screener
+                            .enrich_candidate_fees(&mut result.candidates, config)
+                            .await;
+                        Ok(serde_json::to_string_pretty(&result)?)
+                    }
                     Err(e) => Ok(format!("{{\"error\": \"{}\"}}", e)),
                 }
             }
@@ -1031,6 +1398,186 @@ impl ToolExecutor {
                 }
             }
 
+            // ── Lessons ────────────────────────────────────────
+            "add_lesson" => {
+                let content = args["content"].as_str().unwrap_or("");
+                if content.is_empty() {
+                    anyhow::bail!("content required");
+                }
+                let role = args["role"].as_str().unwrap_or("general");
+                let tags: Vec<String> = args["tags"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|t| t.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let path = meridian_data_path("lessons.json");
+                let path_str = path.to_str().unwrap_or("lessons.json");
+                let mut store = LessonStore::load(path_str)?;
+                store.add_with_meta(content, role, tags, 0.7, "manual");
+                store.save(path_str)?;
+                Ok(json!({"success": true, "message": "Lesson saved"}).to_string())
+            }
+            "list_lessons" => {
+                let role_filter = args["role"].as_str();
+                let limit = args["limit"].as_u64().unwrap_or(50).clamp(1, 200) as usize;
+                let path = meridian_data_path("lessons.json");
+                let store = LessonStore::load(path.to_str().unwrap_or("lessons.json"))?;
+                let lessons: Vec<&crate::lessons::Lesson> = store
+                    .lessons
+                    .iter()
+                    .filter(|l| match role_filter {
+                        Some(r) => l.role.as_deref() == Some(r),
+                        None => true,
+                    })
+                    .take(limit)
+                    .collect();
+                Ok(serde_json::to_string_pretty(&json!({
+                    "success": true,
+                    "count": lessons.len(),
+                    "lessons": lessons,
+                }))?)
+            }
+            "pin_lesson" | "unpin_lesson" => {
+                let id = args["id"].as_str().unwrap_or("");
+                if id.is_empty() {
+                    anyhow::bail!("id required");
+                }
+                let path = meridian_data_path("lessons.json");
+                let path_str = path.to_str().unwrap_or("lessons.json");
+                let mut store = LessonStore::load(path_str)?;
+                let changed = if name == "pin_lesson" {
+                    store.pin(id)
+                } else {
+                    store.unpin(id)
+                };
+                if changed {
+                    store.save(path_str)?;
+                }
+                Ok(json!({
+                    "success": changed,
+                    "message": if changed {
+                        format!("Lesson {} {}", id, if name == "pin_lesson" { "pinned" } else { "unpinned" })
+                    } else {
+                        format!("Lesson {} not found", id)
+                    },
+                })
+                .to_string())
+            }
+            "clear_lessons" => {
+                let path = meridian_data_path("lessons.json");
+                let path_str = path.to_str().unwrap_or("lessons.json");
+                let mut store = LessonStore::load(path_str)?;
+                store.clear();
+                store.save(path_str)?;
+                Ok(json!({"success": true, "message": "All lessons cleared"}).to_string())
+            }
+
+            // ── Smart wallets ──────────────────────────────────
+            "add_smart_wallet" => {
+                let address = args["address"].as_str().unwrap_or("");
+                let label = args["label"].as_str().unwrap_or("");
+                if address.is_empty() || label.is_empty() {
+                    anyhow::bail!("address and label required");
+                }
+                let category = args["category"].as_str();
+                let wallet_type = args["type"].as_str();
+                let mut store = crate::tools::smart_wallets::SmartWalletStore::load()?;
+                let result = store.add_wallet(address, label, category, wallet_type)?;
+                Ok(serde_json::to_string_pretty(&result)?)
+            }
+            "list_smart_wallets" => {
+                let store = crate::tools::smart_wallets::SmartWalletStore::load()?;
+                Ok(serde_json::to_string_pretty(&store.list_wallets())?)
+            }
+            "remove_smart_wallet" => {
+                let address = args["address"].as_str().unwrap_or("");
+                if address.is_empty() {
+                    anyhow::bail!("address required");
+                }
+                let mut store = crate::tools::smart_wallets::SmartWalletStore::load()?;
+                let result = store.remove_wallet(address)?;
+                Ok(serde_json::to_string_pretty(&result)?)
+            }
+
+            // ── Blacklist / deployer blocklist ─────────────────
+            "list_blacklist" => Ok(serde_json::to_string_pretty(
+                &crate::tools::blacklist::list_blacklist(),
+            )?),
+            "remove_from_blacklist" => {
+                let mint = args["mint"].as_str().unwrap_or("");
+                if mint.is_empty() {
+                    anyhow::bail!("mint required");
+                }
+                match crate::tools::blacklist::remove_from_blacklist(mint) {
+                    Ok(result) => Ok(serde_json::to_string_pretty(&result)?),
+                    Err(e) => Ok(format!("Error: {}", e)),
+                }
+            }
+            "block_deployer" => {
+                let wallet = args["wallet"].as_str().unwrap_or("");
+                if wallet.is_empty() {
+                    anyhow::bail!("wallet required");
+                }
+                let reason = args["reason"].as_str();
+                let label = args["label"].as_str();
+                match crate::tools::blacklist::block_dev(wallet, reason, label) {
+                    Ok(result) => Ok(serde_json::to_string_pretty(&result)?),
+                    Err(e) => Ok(format!("Error: {}", e)),
+                }
+            }
+            "list_blocked_deployers" => Ok(serde_json::to_string_pretty(
+                &crate::tools::blacklist::list_blocked_devs(),
+            )?),
+
+            // ── Pool detail / position note ────────────────────
+            "get_pool_detail" => {
+                let pool = args["pool_address"].as_str().unwrap_or("");
+                if pool.is_empty() {
+                    anyhow::bail!("pool_address required");
+                }
+                let timeframe = config.screening.timeframe.as_str();
+                match self.screener.get_pool_detail(pool, timeframe).await {
+                    Ok(Some(detail)) => Ok(serde_json::to_string_pretty(&detail)?),
+                    Ok(None) => Ok(json!({
+                        "success": false,
+                        "error": format!("Pool {} not found", pool),
+                    })
+                    .to_string()),
+                    Err(e) => Ok(format!("{{\"error\": \"{}\"}}", e)),
+                }
+            }
+            "set_position_note" => {
+                let note = args["note"].as_str().unwrap_or("");
+                if note.is_empty() {
+                    anyhow::bail!("note required");
+                }
+                let Some(position) = find_tracked_position(args, positions).map(|p| p.id.clone())
+                else {
+                    anyhow::bail!("position not found in tracked state");
+                };
+                let ok = positions.set_instruction(&position, Some(note));
+                if ok {
+                    let state_path = std::env::var("MERIDIAN_STATE_PATH").unwrap_or_else(|_| {
+                        meridian_data_path("meridian-state.json")
+                            .to_string_lossy()
+                            .into_owned()
+                    });
+                    positions.save(&state_path)?;
+                }
+                Ok(json!({
+                    "success": ok,
+                    "message": if ok {
+                        format!("Instruction set for position {}", position)
+                    } else {
+                        "Position not found".to_string()
+                    },
+                })
+                .to_string())
+            }
+
             // ── Mutable tools (stubs — need SDK) ───────────────
             "deploy_position" => {
                 let pool = args["pool_address"].as_str().unwrap_or("");
@@ -1046,7 +1593,224 @@ impl ToolExecutor {
                 )
                 .await
                 {
-                    Ok(result) => Ok(serde_json::to_string_pretty(&result)?),
+                    Ok(result) => {
+                        // Capture entry-time screening signals so the Darwin
+                        // learner (signal_weights) + lessons can attribute
+                        // outcomes. The LLM args only carry pool/amount/bins.
+                        let em = crate::tools::screening::fetch_entry_metrics(
+                            pool,
+                            &config.screening.timeframe,
+                        )
+                        .await
+                        .unwrap_or_default();
+                        if result.success {
+                            if let Some(position_id) = result.position.clone() {
+                                if !positions.positions.contains_key(&position_id)
+                                    && !pool.is_empty()
+                                {
+                                    let pool_name = result
+                                        .pool_name
+                                        .clone()
+                                        .or_else(|| args["pool_name"].as_str().map(str::to_string))
+                                        .or_else(|| args["name"].as_str().map(str::to_string));
+                                    let base_symbol =
+                                        args["symbol"].as_str().map(str::to_string).or_else(|| {
+                                            pool_name
+                                                .as_deref()
+                                                .and_then(|name| name.split('-').next())
+                                                .filter(|symbol| !symbol.is_empty())
+                                                .map(str::to_string)
+                                        });
+                                    let bin_range = result.bin_range.clone();
+
+                                    positions.add(crate::state::positions::TrackedPosition {
+                                        id: position_id,
+                                        pool_address: pool.to_string(),
+                                        pool_name,
+                                        base_mint: result
+                                            .base_mint
+                                            .clone()
+                                            .or_else(|| {
+                                                args["base_mint"].as_str().map(str::to_string)
+                                            })
+                                            .unwrap_or_else(|| pool.to_string()),
+                                        base_symbol,
+                                        strategy: strategy.map(str::to_string),
+                                        amount_x: result.amount_x.unwrap_or(0.0),
+                                        active_bin_at_deploy: result
+                                            .bin_range
+                                            .as_ref()
+                                            .and_then(|range| range.active),
+                                        bin_step: result.bin_step,
+                                        volatility: em
+                                            .volatility
+                                            .or_else(|| args["volatility"].as_f64()),
+                                        fee_tvl_ratio: em
+                                            .fee_tvl_ratio
+                                            .or_else(|| args["fee_tvl_ratio"].as_f64()),
+                                        organic_score: em
+                                            .organic_score
+                                            .or_else(|| args["organic_score"].as_f64()),
+                                        initial_value_usd: args["initial_value_usd"].as_f64(),
+                                        entry_mcap: em
+                                            .mcap
+                                            .or_else(|| args["entry_mcap"].as_f64()),
+                                        entry_tvl: em.tvl.or_else(|| args["entry_tvl"].as_f64()),
+                                        entry_volume: em
+                                            .volume
+                                            .or_else(|| args["entry_volume"].as_f64()),
+                                        entry_holders: em
+                                            .holders
+                                            .or_else(|| args["entry_holders"].as_u64()),
+                                        lower_bin: bin_range
+                                            .as_ref()
+                                            .map(|range| range.min)
+                                            .unwrap_or(0),
+                                        upper_bin: bin_range
+                                            .as_ref()
+                                            .map(|range| range.max)
+                                            .unwrap_or(0),
+                                        amount_sol: amount,
+                                        created_at: chrono::Utc::now().to_rfc3339(),
+                                        signal_snapshot: Some(json!({
+                                            "dryRun": false,
+                                            "pool": pool,
+                                            "amountSol": amount,
+                                            "binsBelow": bins_below,
+                                            "binsAbove": bins_above,
+                                            "strategy": strategy,
+                                            "binRange": result.bin_range,
+                                            "priceRange": result.price_range,
+                                            "rangeCoverage": result.range_coverage,
+                                            "safetyChecks": result.safety_checks,
+                                            // Screening signals read by the Darwin
+                                            // learner (signal_weights::SIGNAL_NAMES).
+                                            "organic_score": em.organic_score,
+                                            "fee_tvl_ratio": em.fee_tvl_ratio,
+                                            "volume": em.volume,
+                                            "mcap": em.mcap,
+                                            "holder_count": em.holders,
+                                            "volatility": em.volatility,
+                                        })),
+                                        ..crate::state::positions::TrackedPosition::default()
+                                    });
+                                }
+                            }
+                        }
+
+                        if config.dry_run
+                            && result
+                                .note
+                                .as_deref()
+                                .is_some_and(|note| note.starts_with("DRY RUN"))
+                            && !pool.is_empty()
+                        {
+                            let position_id = format!(
+                                "dryrun-{}-{}",
+                                &pool[..pool.len().min(6)],
+                                chrono::Utc::now().timestamp_millis()
+                            );
+                            let pool_name = result
+                                .pool_name
+                                .clone()
+                                .or_else(|| args["pool_name"].as_str().map(str::to_string))
+                                .or_else(|| args["name"].as_str().map(str::to_string));
+                            let base_symbol = args["symbol"]
+                                .as_str()
+                                .map(str::to_string)
+                                .or_else(|| {
+                                    pool_name
+                                        .as_deref()
+                                        .and_then(|name| name.split('-').next())
+                                        .filter(|symbol| !symbol.is_empty())
+                                        .map(str::to_string)
+                                })
+                                .or_else(|| Some("DRYRUN".to_string()));
+                            let bin_range = result.bin_range.clone();
+
+                            positions.add(crate::state::positions::TrackedPosition {
+                                id: position_id,
+                                pool_address: pool.to_string(),
+                                pool_name,
+                                base_mint: result
+                                    .base_mint
+                                    .clone()
+                                    .or_else(|| args["base_mint"].as_str().map(str::to_string))
+                                    .unwrap_or_else(|| pool.to_string()),
+                                base_symbol,
+                                strategy: strategy.map(str::to_string),
+                                amount_x: result.amount_x.unwrap_or(0.0),
+                                active_bin_at_deploy: result
+                                    .bin_range
+                                    .as_ref()
+                                    .and_then(|range| range.active),
+                                bin_step: result.bin_step,
+                                volatility: em
+                                    .volatility
+                                    .or_else(|| args["volatility"].as_f64()),
+                                fee_tvl_ratio: em
+                                    .fee_tvl_ratio
+                                    .or_else(|| args["fee_tvl_ratio"].as_f64()),
+                                organic_score: em
+                                    .organic_score
+                                    .or_else(|| args["organic_score"].as_f64()),
+                                initial_value_usd: args["initial_value_usd"].as_f64(),
+                                entry_mcap: em.mcap.or_else(|| args["entry_mcap"].as_f64()),
+                                entry_tvl: em.tvl.or_else(|| args["entry_tvl"].as_f64()),
+                                entry_volume: em.volume.or_else(|| args["entry_volume"].as_f64()),
+                                entry_holders: em
+                                    .holders
+                                    .or_else(|| args["entry_holders"].as_u64()),
+                                lower_bin: bin_range.as_ref().map(|range| range.min).unwrap_or(0),
+                                upper_bin: bin_range.as_ref().map(|range| range.max).unwrap_or(0),
+                                amount_sol: amount,
+                                created_at: chrono::Utc::now().to_rfc3339(),
+                                total_fees_claimed: 0.0,
+                                pnl_sol: Some(0.0),
+                                instruction: Some("dry-run deploy simulation".to_string()),
+                                note: result.note.clone(),
+                                signal_snapshot: Some(json!({
+                                    "dryRun": true,
+                                    "pool": pool,
+                                    "amountSol": amount,
+                                    "binsBelow": bins_below,
+                                    "binsAbove": bins_above,
+                                    "strategy": strategy,
+                                    "binRange": result.bin_range,
+                                    "priceRange": result.price_range,
+                                    "rangeCoverage": result.range_coverage,
+                                    "safetyChecks": result.safety_checks,
+                                    "organic_score": em.organic_score,
+                                    "fee_tvl_ratio": em.fee_tvl_ratio,
+                                    "volume": em.volume,
+                                    "mcap": em.mcap,
+                                    "holder_count": em.holders,
+                                    "volatility": em.volatility,
+                                })),
+                                ..crate::state::positions::TrackedPosition::default()
+                            });
+                        }
+
+                        // Persist immediately so the positions API reflects the
+                        // new position right away. The screening cycle otherwise
+                        // only saves at its end, leaving freshly-deployed
+                        // positions invisible to the dashboard for the rest of
+                        // the cycle (while the activity log already showed the
+                        // deploy from the per-tool decision log).
+                        if result.success || config.dry_run {
+                            let state_path =
+                                std::env::var("MERIDIAN_STATE_PATH").unwrap_or_else(|_| {
+                                    meridian_data_path("meridian-state.json")
+                                        .to_string_lossy()
+                                        .into_owned()
+                                });
+                            if let Err(e) = positions.save(&state_path) {
+                                warn("executor", &format!("deploy state save failed: {}", e));
+                            }
+                        }
+
+                        Ok(serde_json::to_string_pretty(&result)?)
+                    }
                     Err(e) => Ok(json!({
                         "success": false,
                         "pool": pool,
@@ -1074,7 +1838,7 @@ impl ToolExecutor {
                 let close = close_position(position, reason, config).await?;
                 let mut result = serde_json::to_value(&close)?;
                 enrich_close_result_with_position_metadata(&mut result, args, positions);
-                self.maybe_auto_swap_after_close(&mut result, skip_swap, config)
+                self.maybe_auto_swap_base_to_sol(&mut result, skip_swap, config)
                     .await?;
                 Ok(serde_json::to_string_pretty(&result)?)
             }
@@ -1086,8 +1850,20 @@ impl ToolExecutor {
                 if position.is_empty() {
                     anyhow::bail!("position_id or position_address required");
                 }
+                let skip_swap = args["skip_swap"]
+                    .as_bool()
+                    .or_else(|| args["skipSwap"].as_bool())
+                    .unwrap_or(false);
                 match claim_fees(position, config).await {
-                    Ok(result) => Ok(serde_json::to_string_pretty(&result)?),
+                    Ok(claim) => {
+                        // Same as close: swap the claimed base token back to SOL
+                        // so harvested fees compound instead of piling up as dust.
+                        let mut result = serde_json::to_value(&claim)?;
+                        enrich_close_result_with_position_metadata(&mut result, args, positions);
+                        self.maybe_auto_swap_base_to_sol(&mut result, skip_swap, config)
+                            .await?;
+                        Ok(serde_json::to_string_pretty(&result)?)
+                    }
                     Err(e) => Ok(json!({
                         "success": false,
                         "position": position,
@@ -1539,42 +2315,6 @@ mod tests {
             .expect("message should be present")
             .contains("No LPAgent top LPer data"));
         assert!(parsed["lpers"].as_array().unwrap().is_empty());
-    }
-
-    #[test]
-    fn auto_swap_plan_uses_close_base_mint_when_value_is_not_dust() {
-        let close_result = json!({"success": true, "baseMint": "TokenMint111"});
-        let wallet_balances = balances(vec![TokenBalance {
-            mint: "TokenMint111".to_string(),
-            symbol: "TOK".to_string(),
-            balance: 12.5,
-            usd: Some(0.11),
-        }]);
-
-        let plan = plan_auto_swap_after_close(&close_result, &wallet_balances, false)
-            .expect("token worth >= $0.10 should be auto-swapped");
-
-        assert_eq!(plan.mint, "TokenMint111");
-        assert_eq!(plan.amount, 12.5);
-        assert_eq!(plan.usd, 0.11);
-    }
-
-    #[test]
-    fn auto_swap_plan_respects_skip_swap_dust_and_sol_mint() {
-        let token_result = json!({"success": true, "baseMint": "TokenMint111"});
-        let wallet_balances = balances(vec![TokenBalance {
-            mint: "TokenMint111".to_string(),
-            symbol: "TOK".to_string(),
-            balance: 12.5,
-            usd: Some(0.09),
-        }]);
-
-        assert!(plan_auto_swap_after_close(&token_result, &wallet_balances, true).is_none());
-        assert!(plan_auto_swap_after_close(&token_result, &wallet_balances, false).is_none());
-
-        let sol_result =
-            json!({"success": true, "baseMint": "So11111111111111111111111111111111111111112"});
-        assert!(plan_auto_swap_after_close(&sol_result, &wallet_balances, false).is_none());
     }
 
     #[test]

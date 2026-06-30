@@ -57,7 +57,7 @@ impl AgentLoop {
             &format!(
                 "Agent loop starting — role={}, goal={}",
                 role.as_str(),
-                &goal[..goal.len().min(80)]
+                goal.chars().take(80).collect::<String>()
             ),
         );
 
@@ -127,11 +127,11 @@ impl AgentLoop {
                 &format!("Step {}/{}", step + 1, config.llm.max_steps),
             );
 
-            let tool_choice = if step == 0 && is_action_intent(goal) {
-                json!("required")
-            } else {
-                json!("auto")
-            };
+            // Always "auto": some providers (e.g. DeepSeek thinking models) reject
+            // a forced tool_choice ("Thinking mode does not support this
+            // tool_choice", 400). The action goals are explicit enough that the
+            // model still calls the tool under "auto".
+            let tool_choice = json!("auto");
 
             let response = llm
                 .chat_with_tools(
@@ -180,7 +180,7 @@ impl AgentLoop {
                     &format!(
                         "Tool call: {}({})",
                         tc.function.name,
-                        &tc.function.arguments[..tc.function.arguments.len().min(100)]
+                        tc.function.arguments.chars().take(100).collect::<String>()
                     ),
                 );
 
@@ -191,7 +191,7 @@ impl AgentLoop {
                     &format!(
                         "Tool result [{}]: {}",
                         if is_error { "ERR" } else { "OK" },
-                        &result[..result.len().min(200)]
+                        result.chars().take(200).collect::<String>()
                     ),
                 );
 
@@ -237,6 +237,10 @@ fn load_learning_context(role: &AgentRole, config: &Config) -> String {
         if let Ok(weights) = SignalWeightsStore::load(&weights_path) {
             sections.push(weights.summary());
         }
+    }
+
+    if let Some(hive) = crate::hivemind::shared_lessons_for_prompt(&role_key, 6) {
+        sections.push(hive);
     }
 
     sections.join("\n\n")

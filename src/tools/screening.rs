@@ -34,10 +34,48 @@ pub struct ScreeningResult {
     pub total_screened: usize,
     pub candidates: Vec<CondensedPool>,
     pub filtered_examples: Vec<FilteredPoolExample>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub single_candidate_skip_reason: Option<String>,
 }
 
 pub struct Screener {
     client: Client,
+}
+
+/// Entry-time market metrics captured at deploy/adopt so the Darwin learner
+/// (`signal_weights`) and lessons have real screening signals to attribute
+/// outcomes to. The LLM's `deploy_position` args only carry pool/amount/bins,
+/// so these are fetched from the pool's screening data instead.
+#[derive(Debug, Clone, Default)]
+pub struct EntryMetrics {
+    pub mcap: Option<f64>,
+    pub tvl: Option<f64>,
+    pub volume: Option<f64>,
+    pub holders: Option<u64>,
+    pub volatility: Option<f64>,
+    pub fee_tvl_ratio: Option<f64>,
+    pub organic_score: Option<f64>,
+    pub bin_step: Option<u16>,
+}
+
+/// Fetch entry metrics for a pool by re-using the screening pool-detail API.
+/// Returns `None` on any API/parse failure (callers should degrade gracefully).
+pub async fn fetch_entry_metrics(pool_address: &str, timeframe: &str) -> Option<EntryMetrics> {
+    let detail = Screener::new()
+        .get_pool_detail(pool_address, timeframe)
+        .await
+        .ok()
+        .flatten()?;
+    Some(EntryMetrics {
+        mcap: detail.base_token_mcap,
+        tvl: detail.tvl.or(detail.active_tvl),
+        volume: detail.volume,
+        holders: detail.base_token_holders,
+        volatility: detail.volatility,
+        fee_tvl_ratio: detail.fee_active_tvl_ratio,
+        organic_score: detail.base_token_organic_score,
+        bin_step: detail.dlmm_bin_step,
+    })
 }
 
 impl Screener {
@@ -242,6 +280,32 @@ impl Screener {
 
         Ok(result)
     }
+
+    /// Override each candidate's `fees_sol` with GMGN's cumulative token fee
+    /// when a GMGN API key is configured. This is the primary `minTokenFeesSol`
+    /// signal; pools keep their pool/Jupiter fee figure on miss (faithful to the
+    /// original JS fallback behavior). No-op when GMGN is not configured.
+    pub async fn enrich_candidate_fees(
+        &self,
+        candidates: &mut [CondensedPool],
+        config: &crate::config::Config,
+    ) {
+        if !crate::tools::gmgn::has_gmgn_api_key(config) {
+            return;
+        }
+        for candidate in candidates.iter_mut() {
+            if candidate.base.mint.is_empty() {
+                continue;
+            }
+            if let Some(fees) =
+                crate::tools::gmgn::get_gmgn_token_fees(&candidate.base.mint, config).await
+            {
+                if let Some(total) = fees.total_fee {
+                    candidate.fees_sol = total;
+                }
+            }
+        }
+    }
 }
 
 fn condense_raw_pool(pool: &RawPool) -> CondensedPool {
@@ -276,6 +340,7 @@ fn condense_raw_pool(pool: &RawPool) -> CondensedPool {
             symbol: base_symbol,
             organic: base_organic,
             mcap: Some(mcap),
+            icon: base.and_then(|b| b.icon.clone()),
         },
         quote_organic,
         tvl: pool.tvl.or(pool.active_tvl).unwrap_or(0.0),
@@ -336,11 +401,46 @@ pub fn screen_raw_pools(raw: Vec<RawPool>, s: &ScreeningConfig, limit: usize) ->
     candidates.truncate(limit);
     apply_pvp_risk_policy_with_rejections(&mut candidates, s, &mut filtered_examples);
 
+    let single_candidate_skip_reason = if candidates.len() == 1 {
+        single_candidate_skip_reason(&candidates[0])
+    } else {
+        None
+    };
+
     ScreeningResult {
         total_screened,
         candidates,
         filtered_examples,
+        single_candidate_skip_reason,
     }
+}
+
+pub fn single_candidate_skip_reason(candidate: &CondensedPool) -> Option<String> {
+    if candidate.is_pvp == Some(true) {
+        return Some(format!(
+            "only one candidate survived, but it has high PVP risk against {}",
+            candidate
+                .pvp_rival_name
+                .as_deref()
+                .unwrap_or("a rival pool")
+        ));
+    }
+
+    if candidate.fees_sol < PVP_MIN_GLOBAL_FEES_SOL && candidate.discord_signal != Some(true) {
+        return Some(format!(
+            "only one candidate survived and token fees are weak ({:.2} SOL); original JS requires extra conviction before lone-candidate deploys",
+            candidate.fees_sol
+        ));
+    }
+
+    if candidate.base.organic < 55.0 && candidate.discord_signal != Some(true) {
+        return Some(format!(
+            "only one candidate survived and organic score is marginal ({:.1}); require stronger narrative/smart-wallet confirmation",
+            candidate.base.organic
+        ));
+    }
+
+    None
 }
 
 pub fn raw_pool_screening_reject_reason(pool: &RawPool, s: &ScreeningConfig) -> Option<String> {
@@ -432,7 +532,7 @@ pub fn raw_pool_screening_reject_reason(pool: &RawPool, s: &ScreeningConfig) -> 
             ));
         }
     }
-    if bin_step.is_none_or(|bin_step| bin_step < s.min_bin_step) {
+    if bin_step.is_some_and(|bin_step| bin_step < s.min_bin_step) {
         return Some(format!(
             "bin_step {} below minBinStep {}",
             bin_step
@@ -694,6 +794,7 @@ mod tests {
                 symbol: symbol.to_string(),
                 organic: 75.0,
                 mcap: Some(500_000.0),
+                icon: None,
             },
             quote_organic: 80.0,
             tvl,
@@ -795,6 +896,28 @@ mod tests {
         assert_eq!(json["pvp_rival_mint"], "MintBeta");
     }
 
+    #[test]
+    fn single_candidate_skip_reason_requires_extra_conviction_for_weak_lone_candidate() {
+        let weak_fees = candidate("PoolWeak", "MintWeak", "WEAK", 80.0, 20_000.0, 900, 12.0);
+
+        assert_eq!(
+            single_candidate_skip_reason(&weak_fees).as_deref(),
+            Some("only one candidate survived and token fees are weak (12.00 SOL); original JS requires extra conviction before lone-candidate deploys")
+        );
+
+        let mut discord_confirmed = weak_fees.clone();
+        discord_confirmed.discord_signal = Some(true);
+        assert_eq!(single_candidate_skip_reason(&discord_confirmed), None);
+
+        let mut pvp = candidate("PoolPvp", "MintPvp", "MOON", 500.0, 20_000.0, 900, 41.0);
+        pvp.is_pvp = Some(true);
+        pvp.pvp_rival_name = Some("Moon Rival".to_string());
+        assert_eq!(
+            single_candidate_skip_reason(&pvp).as_deref(),
+            Some("only one candidate survived, but it has high PVP risk against Moon Rival")
+        );
+    }
+
     fn raw_pool(name: &str, pool_address: &str, mint: &str, symbol: &str) -> RawPool {
         RawPool {
             pool_address: Some(pool_address.to_string()),
@@ -825,6 +948,7 @@ mod tests {
                 launchpad: None,
                 launchpad_platform: None,
                 created_at: Some(0.0),
+                icon: None,
             }),
             token_y: Some(crate::models::pool::TokenY {
                 address: Some("So11111111111111111111111111111111111111112".to_string()),

@@ -5,10 +5,10 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
-use tower_http::cors::{Any, CorsLayer};
 
 use crate::config::llm_config::LlmCredentials;
 use crate::config::{load_config, meridian_data_path, resolve_config_path, save_config, Config};
@@ -18,7 +18,9 @@ use crate::llm::{FunctionCall, LlmClient, ToolCall};
 use crate::state::pool_memory::PoolMemoryStore;
 use crate::state::positions::PositionState;
 use crate::tools::blacklist::BlacklistStore;
-use crate::tools::executor::{read_recent_decisions_from_path, ToolExecutor};
+use crate::tools::executor::{
+    append_decision_log_entry, read_recent_decisions_from_path, ToolExecutor,
+};
 use crate::tools::screening::Screener;
 use crate::tools::wallet::get_wallet_balances;
 
@@ -44,7 +46,11 @@ impl Default for WebAppState {
 
 pub async fn start_web_server() -> anyhow::Result<()> {
     let app = build_router(WebAppState::default());
-    let addr = std::env::var("MERIDIAN_WEB_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
+    // Internal API service: bind to loopback by default so it is never exposed
+    // on the network. The Next.js dashboard reaches it server-side via its proxy
+    // (MERIDIAN_BACKEND_URL). Override MERIDIAN_WEB_ADDR only for deliberate,
+    // trusted setups.
+    let addr = std::env::var("MERIDIAN_WEB_ADDR").unwrap_or_else(|_| "127.0.0.1:3001".to_string());
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("[Meridian HyperOS] Running on http://{addr}");
@@ -65,19 +71,45 @@ pub fn build_router(state: WebAppState) -> Router {
         .route("/api/control", post(post_control))
         .route("/api/lessons", get(get_lessons))
         .route("/api/performance", get(get_performance))
+        .route("/api/portfolio", get(get_portfolio))
         .route("/api/blacklist", get(get_blacklist))
         .with_state(state)
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
+    // No CORS layer: this backend is reached only server-side by the Next.js
+    // proxy, so it intentionally emits no cross-origin headers. Browsers cannot
+    // call it directly, keeping the API invisible to the frontend/client.
 }
 
 async fn main_page() -> Html<&'static str> {
     Html(
-        r#"
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Meridian API</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #07111f; color: #e7eef8; font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { width: min(560px, calc(100vw - 40px)); padding: 28px; border: 1px solid rgba(148,163,184,.18); border-radius: 18px; background: rgba(13,23,38,.92); box-shadow: 0 18px 50px rgba(0,0,0,.22); }
+    h1 { margin: 0 0 8px; font-size: 30px; letter-spacing: -.04em; }
+    p { margin: 0 0 18px; color: #9fb0c5; }
+    a { display: inline-flex; padding: 10px 14px; border: 1px solid rgba(54,211,153,.45); border-radius: 10px; background: rgba(54,211,153,.10); color: #bbf7d0; font-weight: 800; text-decoration: none; }
+    code { color: #44c7f4; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Meridian API service</h1>
+    <p>This Rust backend is running as an API service only. Use the frontend dashboard at <code>127.0.0.1:3000</code>.</p>
+    <a href="http://127.0.0.1:3000">Open frontend dashboard</a>
+  </main>
+</body>
+</html>"#,
+    )
+}
+
+#[cfg(any())]
+const _OLD_MAIN_PAGE: &str = r#"
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -88,9 +120,9 @@ async fn main_page() -> Html<&'static str> {
     :root {
       color-scheme: dark;
       --bg: #050816;
-      --panel: rgba(12, 18, 32, .78);
-      --panel-strong: rgba(15, 23, 42, .92);
-      --line: rgba(148, 163, 184, .18);
+      --panel: rgba(8, 13, 25, .58);
+      --panel-strong: rgba(10, 16, 29, .74);
+      --line: rgba(148, 163, 184, .16);
       --muted: #94a3b8;
       --text: #e5edf7;
       --cyan: #38bdf8;
@@ -105,11 +137,14 @@ async fn main_page() -> Html<&'static str> {
       margin: 0;
       min-height: 100vh;
       font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif;
+      font-size: 13px;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: geometricPrecision;
       background:
-        radial-gradient(circle at 15% 12%, rgba(34,211,238,.22), transparent 30%),
-        radial-gradient(circle at 86% 14%, rgba(167,139,250,.18), transparent 30%),
-        radial-gradient(circle at 55% 92%, rgba(16,185,129,.16), transparent 34%),
-        linear-gradient(135deg, #020617, #07111f 48%, #07031a);
+        radial-gradient(circle at 12% 18%, rgba(34,211,238,.18), transparent 28%),
+        radial-gradient(circle at 83% 8%, rgba(167,139,250,.15), transparent 26%),
+        radial-gradient(circle at 48% 100%, rgba(16,185,129,.12), transparent 34%),
+        linear-gradient(135deg, #020617, #07111f 52%, #07031a);
       color: var(--text);
       overflow-x: hidden;
     }
@@ -122,14 +157,14 @@ async fn main_page() -> Html<&'static str> {
       background-size: 44px 44px;
       mask-image: linear-gradient(to bottom, black, transparent 88%);
     }
-    main { width: min(1760px, calc(100vw - 48px)); margin: 0 auto; padding: 32px 0 48px; position: relative; z-index: 1; }
-    .hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px; align-items: end; margin-bottom: 24px; }
-    .eyebrow { color: var(--emerald); letter-spacing: .34em; text-transform: uppercase; font: 700 11px/1.2 "SF Mono", ui-monospace, monospace; }
-    h1 { margin: 8px 0 8px; font-size: clamp(42px, 7vw, 86px); line-height: .92; letter-spacing: -.07em; }
-    .subtitle { max-width: 780px; color: #cbd5e1; font-size: 17px; line-height: 1.65; margin: 0; }
-    .toolbar { display: grid; grid-template-columns: repeat(5, minmax(104px, 1fr)); gap: 10px; padding: 8px; border: 1px solid var(--line); border-radius: 28px; background: rgba(2,6,23,.62); backdrop-filter: blur(18px); box-shadow: 0 24px 70px rgba(0,0,0,.3); }
+    main { width: min(1120px, calc(100vw - 40px)); margin: 0 auto; padding: 20px 0 36px; position: relative; z-index: 1; }
+    .hero { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: end; margin-bottom: 16px; }
+    .eyebrow { color: var(--emerald); letter-spacing: .28em; text-transform: uppercase; font: 800 9px/1.2 "SF Mono", ui-monospace, monospace; }
+    h1 { margin: 6px 0 6px; font-size: clamp(34px, 4vw, 48px); line-height: .96; letter-spacing: -.055em; }
+    .subtitle { max-width: 620px; color: #cbd5e1; font-size: 13px; line-height: 1.5; margin: 0; }
+    .toolbar { display: grid; grid-template-columns: repeat(5, minmax(82px, 1fr)); gap: 7px; padding: 6px; border: 1px solid rgba(148,163,184,.14); border-radius: 18px; background: rgba(2,6,23,.46); backdrop-filter: blur(18px); box-shadow: 0 16px 46px rgba(0,0,0,.22); align-self: center; }
     button, select, input { font: inherit; }
-    button { border: 1px solid var(--line); color: var(--text); background: rgba(15,23,42,.82); border-radius: 18px; padding: 12px 16px; cursor: pointer; transition: transform .15s ease, border-color .15s ease, background .15s ease; }
+    button { border: 1px solid var(--line); color: var(--text); background: rgba(15,23,42,.70); border-radius: 13px; padding: 9px 11px; cursor: pointer; transition: transform .15s ease, border-color .15s ease, background .15s ease; font-size: 11px; font-weight: 700; }
     button:hover { transform: translateY(-1px); border-color: rgba(56,189,248,.55); background: rgba(30,41,59,.88); }
     button:disabled { opacity: .55; cursor: wait; transform: none; }
     .btn-emerald { border-color: rgba(52,211,153,.35); background: rgba(6,78,59,.32); }
@@ -137,44 +172,101 @@ async fn main_page() -> Html<&'static str> {
     .btn-violet { border-color: rgba(167,139,250,.35); background: rgba(76,29,149,.30); }
     .btn-amber { border-color: rgba(251,191,36,.35); background: rgba(120,53,15,.28); }
     .btn-rose { border-color: rgba(251,113,133,.35); background: rgba(136,19,55,.28); }
-    .overview { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 18px; }
-    .metric { border: 1px solid var(--line); border-radius: 26px; padding: 18px; background: rgba(15,23,42,.56); box-shadow: inset 0 1px rgba(255,255,255,.04); }
-    .metric span { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .18em; }
-    .metric strong { display: block; margin-top: 8px; font-size: 28px; letter-spacing: -.04em; }
-    .grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 18px; }
-    .panel { grid-column: span 3; min-height: 260px; border: 1px solid var(--line); border-radius: 30px; background: var(--panel); box-shadow: 0 24px 90px rgba(0,0,0,.26), inset 0 1px rgba(255,255,255,.05); backdrop-filter: blur(18px); overflow: hidden; }
-    .panel.wide { grid-column: span 8; }
-    .panel.medium { grid-column: span 4; }
-    .panel.tall .panel-body { max-height: 560px; }
-    .panel-header { padding: 18px 20px 12px; border-bottom: 1px solid rgba(148,163,184,.10); }
-    .panel-header .label { font: 800 11px/1.2 "SF Mono", ui-monospace, monospace; letter-spacing: .24em; text-transform: uppercase; color: var(--cyan); }
-    .panel-header h2 { margin: 7px 0 0; font-size: 24px; line-height: 1.1; letter-spacing: -.04em; }
-    .panel-body { padding: 18px 20px 22px; max-height: 380px; overflow: auto; color: #dbeafe; }
+    .overview { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 12px; }
+    .metric { border: 1px solid rgba(148,163,184,.14); border-radius: 17px; padding: 13px 14px; background: rgba(15,23,42,.42); box-shadow: inset 0 1px rgba(255,255,255,.035); }
+    .metric span { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .18em; }
+    .metric strong { display: block; margin-top: 6px; font-size: 19px; letter-spacing: -.03em; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-areas:
+        "status positions candidates"
+        "balance controls controls"
+        "cycle decisions config"
+        "lessons blacklist config";
+      gap: 12px;
+      align-items: stretch;
+    }
+    .panel { min-height: 0; border: 1px solid rgba(148,163,184,.14); border-radius: 18px; background: var(--panel); box-shadow: 0 16px 56px rgba(0,0,0,.18), inset 0 1px rgba(255,255,255,.045); backdrop-filter: blur(16px); overflow: hidden; }
+    .panel.wide,
+    .panel.medium { grid-column: auto; }
+    [data-panel="dashboard"] { grid-area: status; }
+    [data-panel="positions"] { grid-area: positions; }
+    [data-panel="candidates"] { grid-area: candidates; }
+    [data-panel="balance"] { grid-area: balance; }
+    [data-panel="controls"] { grid-area: controls; }
+    [data-panel="cycle-log"] { grid-area: cycle; }
+    [data-panel="decisions"] { grid-area: decisions; }
+    [data-panel="config"] { grid-area: config; }
+    [data-panel="lessons"] { grid-area: lessons; }
+    [data-panel="blacklist"] { grid-area: blacklist; }
+    .panel.tall .panel-body { max-height: 430px; }
+    .panel-header { padding: 13px 15px 10px; border-bottom: 1px solid rgba(148,163,184,.09); }
+    .panel-header .label { font: 800 8px/1.2 "SF Mono", ui-monospace, monospace; letter-spacing: .22em; text-transform: uppercase; color: var(--cyan); }
+    .panel-header h2 { margin: 5px 0 0; font-size: 17px; line-height: 1.1; letter-spacing: -.035em; }
+    .panel-body { padding: 14px 15px 16px; max-height: 260px; overflow: auto; color: #dbeafe; font-size: 12px; }
+    [data-panel="controls"] .panel-body { max-height: none; }
+    [data-panel="config"] .panel-body { max-height: 520px; }
+    [data-panel="candidates"] .panel-body,
+    [data-panel="cycle-log"] .panel-body,
+    [data-panel="decisions"] .panel-body { max-height: 240px; }
+    [data-panel="lessons"] .panel-body,
+    [data-panel="blacklist"] .panel-body { max-height: 180px; }
     .panel-body::-webkit-scrollbar { width: 9px; height: 9px; }
     .panel-body::-webkit-scrollbar-thumb { background: rgba(148,163,184,.26); border-radius: 999px; }
-    .kv { display: grid; grid-template-columns: minmax(110px, .8fr) minmax(0, 1.2fr); gap: 10px; padding: 10px 0; border-bottom: 1px solid rgba(148,163,184,.08); }
+    .kv { display: grid; grid-template-columns: minmax(112px, .78fr) minmax(0, 1.22fr); gap: 10px; padding: 9px 0; border-bottom: 1px solid rgba(148,163,184,.075); }
     .kv:last-child { border-bottom: 0; }
-    .kv span { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .12em; }
-    .kv strong { min-width: 0; overflow-wrap: anywhere; }
-    .pill { display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; border-radius: 999px; border: 1px solid var(--line); color: #dbeafe; background: rgba(15,23,42,.75); font: 700 12px/1 "SF Mono", ui-monospace, monospace; }
+    .kv span { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .12em; }
+    .kv strong { min-width: 0; overflow-wrap: anywhere; font-size: 12px; line-height: 1.35; }
+    .pill { display: inline-flex; align-items: center; gap: 7px; padding: 5px 8px; border-radius: 999px; border: 1px solid var(--line); color: #dbeafe; background: rgba(15,23,42,.66); font: 700 10px/1 "SF Mono", ui-monospace, monospace; }
     .pill.ok { color: #bbf7d0; border-color: rgba(52,211,153,.35); background: rgba(6,78,59,.26); }
     .pill.warn { color: #fde68a; border-color: rgba(251,191,36,.35); background: rgba(120,53,15,.24); }
     .pill.bad { color: #fecdd3; border-color: rgba(251,113,133,.35); background: rgba(136,19,55,.24); }
-    .list { display: grid; gap: 10px; }
-    .item { border: 1px solid rgba(148,163,184,.12); border-radius: 18px; padding: 12px; background: rgba(2,6,23,.35); }
-    .item-title { display: flex; justify-content: space-between; gap: 10px; font-weight: 800; }
-    .item-sub { color: var(--muted); margin-top: 6px; font-size: 13px; overflow-wrap: anywhere; }
-    .empty { color: var(--muted); border: 1px dashed rgba(148,163,184,.22); border-radius: 18px; padding: 18px; background: rgba(15,23,42,.34); }
+    .list { display: grid; gap: 9px; }
+    .item { border: 1px solid rgba(148,163,184,.12); border-radius: 15px; padding: 11px; background: rgba(2,6,23,.24); }
+    .item-title { display: flex; justify-content: space-between; gap: 10px; font-weight: 800; font-size: 12px; }
+    .item-sub { color: var(--muted); margin-top: 6px; font-size: 11px; overflow-wrap: anywhere; line-height: 1.35; }
+    .empty { color: var(--muted); border: 1px dashed rgba(148,163,184,.20); border-radius: 15px; padding: 15px; background: rgba(15,23,42,.24); }
     .form-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
     .field label { display: block; color: var(--muted); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; margin-bottom: 7px; }
-    input, select { width: 100%; color: var(--text); background: rgba(2,6,23,.68); border: 1px solid rgba(148,163,184,.22); border-radius: 16px; padding: 12px 13px; outline: none; }
+    input, select { width: 100%; color: var(--text); background: rgba(2,6,23,.54); border: 1px solid rgba(148,163,184,.20); border-radius: 14px; padding: 10px 12px; outline: none; font-size: 12px; }
     input:focus, select:focus { border-color: rgba(56,189,248,.65); box-shadow: 0 0 0 3px rgba(56,189,248,.12); }
-    .result, .log { margin-top: 14px; padding: 14px; border-radius: 18px; background: rgba(2,6,23,.44); border: 1px solid rgba(148,163,184,.10); font: 12px/1.55 "SF Mono", ui-monospace, monospace; white-space: pre-wrap; overflow: auto; max-height: 240px; }
+    .result, .log { margin-top: 13px; padding: 12px; border-radius: 15px; background: rgba(2,6,23,.34); border: 1px solid rgba(148,163,184,.10); font: 11px/1.55 "SF Mono", ui-monospace, monospace; white-space: pre-wrap; overflow: auto; max-height: 220px; }
     .log-line { padding: 5px 0; border-bottom: 1px solid rgba(148,163,184,.07); }
     .muted { color: var(--muted); }
     .accent-emerald { color: var(--emerald) !important; } .accent-violet { color: var(--violet) !important; } .accent-amber { color: var(--amber) !important; } .accent-rose { color: var(--rose) !important; } .accent-orange { color: var(--orange) !important; }
-    @media (max-width: 1180px) { .hero { grid-template-columns: 1fr; } .toolbar, .overview { grid-template-columns: repeat(2, minmax(0, 1fr)); } .panel, .panel.medium, .panel.wide { grid-column: span 6; } }
-    @media (max-width: 760px) { main { width: min(100vw - 24px, 1760px); padding-top: 18px; } .toolbar, .overview, .form-grid { grid-template-columns: 1fr; } .grid { grid-template-columns: 1fr; } .panel, .panel.medium, .panel.wide { grid-column: span 1; } }
+    @media (max-width: 1180px) {
+      .hero { grid-template-columns: 1fr; }
+      .toolbar, .overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-areas:
+          "status positions"
+          "candidates balance"
+          "controls controls"
+          "cycle decisions"
+          "config config"
+          "lessons blacklist";
+      }
+    }
+    @media (max-width: 760px) {
+      main { width: min(100vw - 24px, 1120px); padding-top: 18px; }
+      .toolbar, .overview, .form-grid { grid-template-columns: 1fr; }
+      .grid {
+        grid-template-columns: 1fr;
+        grid-template-areas:
+          "status"
+          "positions"
+          "candidates"
+          "balance"
+          "controls"
+          "cycle"
+          "decisions"
+          "config"
+          "lessons"
+          "blacklist";
+      }
+    }
   </style>
 </head>
 <body>
@@ -280,7 +372,14 @@ const pretty = (v) => JSON.stringify(v, null, 2);
 const esc = (v) => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const short = (v, n=64) => { const s = String(v ?? '—'); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 const pill = (text, tone='') => `<span class="pill ${tone}">${esc(text)}</span>`;
-const kv = (key, value) => `<div class="kv"><span>${esc(key)}</span><strong>${esc(value ?? '—')}</strong></div>`;
+const compactNum = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return value ?? '—';
+  if (Math.abs(n) >= 1000000) return (n / 1000000).toFixed(2) + 'M';
+  if (Math.abs(n) >= 1000) return (n / 1000).toFixed(2) + 'K';
+  return Math.abs(n) >= 10 ? n.toFixed(2) : n.toFixed(4);
+};
+const kv = (key, value) => `<div class="kv"><span>${esc(key)}</span><strong title="${esc(value ?? '—')}">${esc(value ?? '—')}</strong></div>`;
 const empty = (text) => `<div class="empty">${esc(text)}</div>`;
 function setPanel(id, html) { $(id).innerHTML = html; }
 function log(msg, tone='') {
@@ -317,7 +416,7 @@ function renderStatus(payload) {
     kv('Screen every', `${schedule.screeningIntervalMin ?? '—'} min`),
     kv('Manage every', `${schedule.managementIntervalMin ?? '—'} min`),
     kv('PnL poll', `${schedule.pnlPollIntervalSecs ?? '—'} sec`),
-    kv('State path', short(s.state_path, 72)),
+    kv('State path', s.state_path ? 'connected' : 'not set'),
   ].join('');
 }
 function renderPositions(payload) {
@@ -325,7 +424,7 @@ function renderPositions(payload) {
   const data = unwrap(payload);
   const positions = data.positions || [];
   if (!positions.length) return empty('No active positions in local state.');
-  return `<div class="list">${positions.map(p => `<div class="item"><div class="item-title"><span>${esc(p.base_symbol || p.id || 'position')}</span>${pill(p.status || 'active', 'ok')}</div><div class="item-sub">${esc(short(p.id || p.position || '', 72))}</div><div class="item-sub">Pool: ${esc(short(p.pool_address || '', 72))}</div><div class="item-sub">Amount: ${esc(p.amount_sol ?? '—')} SOL · Range: ${esc(p.lower_bin ?? '—')} → ${esc(p.upper_bin ?? '—')}</div></div>`).join('')}</div>`;
+  return `<div class="list">${positions.map(p => `<div class="item"><div class="item-title"><span>${esc(p.pool_name || p.base_symbol || p.id || 'position')}</span>${pill(p.status || 'active', 'ok')}</div><div class="item-sub">${esc(short(p.id || p.position || '', 46))}</div><div class="item-sub">Pool ${esc(short(p.pool_address || '', 38))}</div><div class="item-sub">${esc(compactNum(p.amount_sol))} SOL · bins ${esc(p.lower_bin ?? '—')} → ${esc(p.upper_bin ?? '—')} · PnL ${esc(compactNum(p.pnl_sol ?? 0))} SOL</div></div>`).join('')}</div>`;
 }
 function renderCandidates(payload) {
   if (!payload.success) return renderError(payload);
@@ -337,7 +436,7 @@ function renderCandidates(payload) {
     const examples = filtered.slice(0, 3).map(x => `<div class="item"><div class="item-title"><span>${esc(x.name || x.symbol || 'filtered')}</span>${pill('rejected','warn')}</div><div class="item-sub">${esc(x.reason || 'No reason provided')}</div></div>`).join('');
     return empty(`No deploy candidates. Screened ${data.total_screened ?? 0} pools.`) + (examples ? `<div class="list" style="margin-top:12px">${examples}</div>` : '');
   }
-  return `<div class="list">${candidates.map(c => `<div class="item"><div class="item-title"><span>${esc(c.name || c.symbol || c.pool_address || 'candidate')}</span>${pill(c.score ?? 'candidate', 'ok')}</div><div class="item-sub">${esc(short(c.pool_address || c.address || '', 72))}</div><div class="item-sub">TVL ${esc(c.tvl ?? '—')} · Fees ${esc(c.fees_sol ?? c.total_fees_sol ?? '—')} SOL</div></div>`).join('')}</div>`;
+  return `<div class="list">${candidates.map(c => `<div class="item"><div class="item-title"><span>${esc(c.name || c.symbol || c.pool_address || 'candidate')}</span>${pill(compactNum(c.score) ?? 'candidate', 'ok')}</div><div class="item-sub">${esc(short(c.pool_address || c.address || '', 42))}</div><div class="item-sub">TVL $${esc(compactNum(c.tvl))} · Fees ${esc(compactNum(c.fees_sol ?? c.total_fees_sol))} SOL</div></div>`).join('')}</div>`;
 }
 function renderDecisions(payload) {
   if (!payload.success) return renderError(payload);
@@ -444,13 +543,11 @@ async function patchConfig() {
 function openConfigPatch(){ $('config-path').focus(); }
 function clearLog(){ $('cycle-log').innerHTML = ''; }
 refreshAll();
-setInterval(refreshAll, 15000);
+setInterval(refreshAll, 30000);
 </script>
 </body>
 </html>
-    "#,
-    )
-}
+    "#;
 
 #[derive(Debug, Deserialize)]
 struct LimitQuery {
@@ -482,7 +579,135 @@ async fn status(State(state): State<WebAppState>) -> Json<Value> {
 }
 
 async fn get_positions(State(state): State<WebAppState>) -> Json<Value> {
-    Json(json_ok("positions", positions_payload(&state.state_path)))
+    let config = load_web_config(&state).ok();
+    let simulate_dry_run = config.as_ref().map(|config| config.dry_run).unwrap_or(false);
+    let payload = positions_payload(&state.state_path, simulate_dry_run);
+    // For live (non-dry-run) state, enrich open positions with their current
+    // on-chain claimable (pending) fees so the dashboard reflects real fees,
+    // not just the historical claimed total.
+    let payload = match (payload, config) {
+        (Ok(mut value), Some(config)) if !config.dry_run => {
+            enrich_position_state(&mut value, &config).await;
+            Ok(value)
+        }
+        (payload, _) => payload,
+    };
+    Json(json_ok("positions", payload))
+}
+
+/// Enrich each open position with live values: on-chain `liquidity_*` /
+/// `claimable_fee_*` (SOL + base token) from a read-only close quote, and
+/// `live_pnl_usd` / `live_pnl_pct` / `live_value_usd` from the Meteora PnL API.
+/// Best-effort and decoupled: a failure in one source never blocks the other,
+/// and one bad position never breaks the endpoint.
+async fn enrich_position_state(payload: &mut Value, config: &Config) {
+    let Some(positions) = payload.get_mut("positions").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let http = reqwest::Client::new();
+    let wallet = crate::tools::meteora_native::wallet_pubkey_from_env().unwrap_or_default();
+    for position in positions.iter_mut() {
+        let status = position
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("active")
+            .to_lowercase();
+        if status == "closed" {
+            continue;
+        }
+        let Some(id) = position.get("id").and_then(Value::as_str).map(str::to_string) else {
+            continue;
+        };
+        let pool_address = position
+            .get("pool_address")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let base_mint = position
+            .get("base_mint")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+
+        // Run this position's independent network reads concurrently — quote
+        // (on-chain liquidity/fees), PnL (Meteora API), and icon. Doing them
+        // sequentially made /api/positions take 3–8s for a few positions.
+        let pnl_fut = async {
+            match &pool_address {
+                Some(pool) if !wallet.is_empty() => {
+                    crate::tools::dlmm::get_position_pnl(pool, &id, &wallet).await.ok()
+                }
+                _ => None,
+            }
+        };
+        let icon_fut = async {
+            match &base_mint {
+                Some(mint) if mint != crate::tools::wallet::SOL_MINT => {
+                    crate::tools::dlmm::get_token_icon(mint).await
+                }
+                _ => None,
+            }
+        };
+        let (quote, pnl, base_icon) = tokio::join!(
+            crate::tools::meteora_native::quote_position_state(&id, config),
+            pnl_fut,
+            icon_fut,
+        );
+        let quote = quote.ok();
+        // Token decimals depend on the quote, so resolve after it.
+        let token_decimals = match (&base_mint, &quote) {
+            (Some(mint), Some(q)) if q.liquidity_x > 0 || q.fee_x > 0 => {
+                crate::tools::wallet::resolve_mint_decimals(&http, config, mint)
+                    .await
+                    .ok()
+            }
+            _ => None,
+        };
+
+        let Some(obj) = position.as_object_mut() else {
+            continue;
+        };
+        if let Some(q) = quote {
+            let to_token = |raw: u64| match token_decimals {
+                Some(decimals) => raw as f64 / 10f64.powi(decimals as i32),
+                None => 0.0,
+            };
+            let to_sol = |raw: u64| raw as f64 / 1_000_000_000.0;
+            obj.insert("liquidity_sol".to_string(), json!(to_sol(q.liquidity_y)));
+            obj.insert("liquidity_token".to_string(), json!(to_token(q.liquidity_x)));
+            obj.insert("claimable_fee_sol".to_string(), json!(to_sol(q.fee_y)));
+            obj.insert("claimable_fee_token".to_string(), json!(to_token(q.fee_x)));
+        }
+        if let Some(pnl) = pnl {
+            if let Some(value) = pnl.pnl_usd {
+                obj.insert("live_pnl_usd".to_string(), json!(value));
+            }
+            if let Some(value) = pnl.pnl_pct {
+                obj.insert("live_pnl_pct".to_string(), json!(value));
+            }
+            if let Some(value) = pnl.current_value_usd {
+                obj.insert("live_value_usd".to_string(), json!(value));
+            }
+            // Real price range + active price (for the Meteora-style range bar)
+            // and the 24h fee/TVL APR shown as the fee badge.
+            if let Some(value) = pnl.min_price {
+                obj.insert("price_min".to_string(), json!(value));
+            }
+            if let Some(value) = pnl.max_price {
+                obj.insert("price_max".to_string(), json!(value));
+            }
+            if let Some(value) = pnl.active_price {
+                obj.insert("price_active".to_string(), json!(value));
+            }
+            if let Some(value) = pnl.fee_per_tvl_24h {
+                obj.insert("fee_apr_pct".to_string(), json!(value));
+            }
+            if let Some(value) = pnl.in_range {
+                obj.insert("in_range".to_string(), json!(value));
+            }
+        }
+        if let Some(icon) = base_icon {
+            obj.insert("base_icon".to_string(), json!(icon));
+        }
+    }
 }
 
 async fn get_balance(
@@ -578,6 +803,120 @@ async fn get_performance(State(state): State<WebAppState>) -> Json<Value> {
     ))
 }
 
+/// Portfolio / historical view: aggregate the wallet's CLOSED positions per pool
+/// (PnL, deposit, withdraw, fees) from the Meteora PnL API, plus summary stats.
+async fn get_portfolio(State(state): State<WebAppState>) -> Json<Value> {
+    let wallet = crate::tools::meteora_native::wallet_pubkey_from_env().unwrap_or_default();
+    let positions = match PositionState::load(&state.state_path) {
+        Ok(p) => p,
+        Err(e) => return Json(json_error("portfolio", e)),
+    };
+    // Every pool the wallet has ever held a position in — from Meteora's
+    // /portfolio (the same source as the official UI), so the summary covers
+    // ALL positions and matches Meteora. The old approach used only the bot's
+    // tracked state, which excluded untracked/orphaned positions and badly
+    // understated total PnL. Fall back to tracked state if the API is down.
+    let mut pools: Vec<(String, String)> = crate::tools::dlmm::get_all_wallet_pools(&wallet).await;
+    if pools.is_empty() {
+        let mut seen = std::collections::HashSet::new();
+        for p in positions.get_all() {
+            if !p.pool_address.is_empty() && seen.insert(p.pool_address.clone()) {
+                pools.push((p.pool_address.clone(), p.pool_name.clone().unwrap_or_default()));
+            }
+        }
+    }
+
+    // Fetch each pool's history concurrently — sequential awaits made this
+    // endpoint take ~1.4s × N pools (≈17s for 12 pools), which left the
+    // dashboard "Historical" panel stuck on "Loading history…". JoinSet runs
+    // all pool fetches in parallel so total latency ≈ the slowest single fetch.
+    let mut histories = Vec::new();
+    if !wallet.is_empty() {
+        let mut set = tokio::task::JoinSet::new();
+        for (pool, name) in &pools {
+            let pool = pool.clone();
+            let name = name.clone();
+            let wallet = wallet.clone();
+            set.spawn(async move {
+                crate::tools::dlmm::get_pool_history(&pool, &name, &wallet).await
+            });
+        }
+        while let Some(res) = set.join_next().await {
+            if let Ok(Some(h)) = res {
+                histories.push(h);
+            }
+        }
+    }
+    histories.sort_by(|a, b| {
+        b.pnl_usd
+            .partial_cmp(&a.pnl_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let realized_pnl: f64 = histories.iter().map(|h| h.pnl_usd).sum();
+    let total_deposit: f64 = histories.iter().map(|h| h.deposit_usd).sum();
+    let total_fees: f64 = histories.iter().map(|h| h.fees_usd).sum();
+    let closed_count: usize = histories.iter().map(|h| h.closed_count).sum();
+    let win_count: usize = histories.iter().map(|h| h.win_count).sum();
+    let win_rate = if closed_count > 0 {
+        win_count as f64 / closed_count as f64 * 100.0
+    } else {
+        0.0
+    };
+    let avg_invested = if closed_count > 0 {
+        total_deposit / closed_count as f64
+    } else {
+        0.0
+    };
+
+    // Live unrealized PnL of the wallet's OPEN positions, fetched per pool in
+    // parallel. Meteora's headline total marks open positions to market in
+    // real time; summing closed-only made our total diverge (more negative)
+    // whenever open positions were in profit. Add it so the headline tracks
+    // Meteora and updates as prices move.
+    let mut unrealized_pnl = 0.0;
+    if !wallet.is_empty() {
+        let mut set = tokio::task::JoinSet::new();
+        for (pool, _name) in &pools {
+            let pool = pool.clone();
+            let wallet = wallet.clone();
+            set.spawn(
+                async move { crate::tools::dlmm::get_pool_open_pnl(&pool, &wallet).await },
+            );
+        }
+        while let Some(res) = set.join_next().await {
+            if let Ok(v) = res {
+                unrealized_pnl += v;
+            }
+        }
+    }
+
+    let total_pnl = realized_pnl + unrealized_pnl;
+    let total_pnl_pct = if total_deposit > 0.0 {
+        total_pnl / total_deposit * 100.0
+    } else {
+        0.0
+    };
+
+    Json(json_ok(
+        "portfolio",
+        Ok(json!({
+            "summary": {
+                "totalPnlUsd": total_pnl,
+                "totalPnlPct": total_pnl_pct,
+                "realizedPnlUsd": realized_pnl,
+                "unrealizedPnlUsd": unrealized_pnl,
+                "allTimeDepositUsd": total_deposit,
+                "feesClaimedUsd": total_fees,
+                "closedCount": closed_count,
+                "winRate": win_rate,
+                "avgInvestedUsd": avg_invested,
+            },
+            "pools": histories,
+        })),
+    ))
+}
+
 async fn get_blacklist() -> Json<Value> {
     Json(json_ok("blacklist", blacklist_payload()))
 }
@@ -598,7 +937,7 @@ fn json_error(command: &str, error: impl std::fmt::Display) -> Value {
 }
 
 pub fn web_status_snapshot(config: &Config, state_path: &str) -> Result<Value> {
-    let positions = positions_payload(state_path)?;
+    let positions = positions_payload(state_path, config.dry_run)?;
     let recent_decisions = recent_decisions_payload(state_path, 10)?;
     Ok(json!({
         "status": "running",
@@ -618,8 +957,11 @@ pub fn web_status_snapshot(config: &Config, state_path: &str) -> Result<Value> {
     }))
 }
 
-fn positions_payload(state_path: &str) -> Result<Value> {
-    let state = PositionState::load(state_path)?;
+fn positions_payload(state_path: &str, simulate_dry_run: bool) -> Result<Value> {
+    let mut state = PositionState::load(state_path)?;
+    if simulate_dry_run && refresh_dry_run_pnl(&mut state) {
+        state.save(state_path)?;
+    }
     let mut positions = state.positions.values().cloned().collect::<Vec<_>>();
     positions.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(json!({
@@ -630,6 +972,46 @@ fn positions_payload(state_path: &str) -> Result<Value> {
         "last_updated": state.last_updated,
         "path": state_path,
     }))
+}
+
+fn refresh_dry_run_pnl(state: &mut PositionState) -> bool {
+    let now = Utc::now();
+    let mut changed = false;
+
+    for position in state.positions.values_mut() {
+        if !position.id.starts_with("dryrun-") {
+            continue;
+        }
+
+        let created_at = DateTime::parse_from_rfc3339(&position.created_at)
+            .map(|dt| dt.with_timezone(&Utc))
+            .unwrap_or(now);
+        let age_secs = (now - created_at).num_seconds().max(0) as f64;
+        let amount = position.amount_sol.max(0.0);
+        let seed = position.id.bytes().map(f64::from).sum::<f64>() / 97.0;
+        let wave = ((age_secs / 45.0) + seed).sin() * 0.008;
+        let drift = (age_secs / 3600.0).min(4.0) * 0.0015;
+        let fees = round_sol(amount * (age_secs / 600.0).min(24.0) * 0.00008);
+        let pnl = round_sol(amount * (wave + drift) + fees);
+
+        if (position.total_fees_claimed - fees).abs() > f64::EPSILON
+            || position.pnl_sol != Some(pnl)
+        {
+            position.total_fees_claimed = fees;
+            position.pnl_sol = Some(pnl);
+            position.last_managed_at = Some(now.to_rfc3339());
+            changed = true;
+        }
+    }
+
+    if changed {
+        state.last_updated = Some(now.to_rfc3339());
+    }
+    changed
+}
+
+fn round_sol(value: f64) -> f64 {
+    (value * 1_000_000.0).round() / 1_000_000.0
 }
 
 fn recent_decisions_payload(state_path: &str, limit: usize) -> Result<Value> {
@@ -757,9 +1139,28 @@ async fn run_control_action(state: &WebAppState, request: ControlRequest) -> Res
             );
             let llm = LlmClient::new(&creds.api_key, &creds.base_url);
             let wallet_sol = request.wallet_sol.unwrap_or(0.0);
+            let report = run_screening_cycle(
+                &config,
+                &llm,
+                &mut positions,
+                &mut pool_memory,
+                wallet_sol,
+                &wallet,
+            )
+            .await?;
+            if should_append_screening_no_deploy_decision(&report) {
+                let decision_path = data_dir_for_state(&state.state_path).join("decision-log.json");
+                append_decision_log_entry(
+                    &decision_path,
+                    "screening_cycle",
+                    &json!({"wallet_sol": wallet_sol, "wallet": wallet}),
+                    &json!({"success": false, "note": report}).to_string(),
+                    false,
+                )?;
+            }
             json!({
                 "action": "screen",
-                "result": run_screening_cycle(&config, &llm, &mut positions, &mut pool_memory, wallet_sol, &wallet).await?,
+                "result": report,
             })
         }
         "manage" | "management" => {
@@ -808,6 +1209,13 @@ async fn run_control_action(state: &WebAppState, request: ControlRequest) -> Res
     Ok(result)
 }
 
+fn should_append_screening_no_deploy_decision(report: &str) -> bool {
+    report.contains("No candidates")
+        || report.contains("NO DEPLOY")
+        || report.contains("Not enough SOL")
+        || report.contains("At max positions")
+}
+
 fn data_dir_for_state(state_path: &str) -> PathBuf {
     Path::new(state_path)
         .parent()
@@ -831,6 +1239,9 @@ fn redact_sensitive_values(value: Value) -> Value {
         Value::Array(values) => {
             Value::Array(values.into_iter().map(redact_sensitive_values).collect())
         }
+        Value::String(text) if contains_sensitive_token(&text) => {
+            Value::String("***redacted***".to_string())
+        }
         other => other,
     }
 }
@@ -843,6 +1254,15 @@ fn is_sensitive_key(key: &str) -> bool {
         || normalized.contains("secret")
         || normalized.contains("private")
         || normalized.contains("password")
+}
+
+fn contains_sensitive_token(value: &str) -> bool {
+    let normalized = value.to_ascii_lowercase();
+    normalized.contains("api-key=")
+        || normalized.contains("apikey=")
+        || normalized.contains("api_key=")
+        || normalized.contains("token=")
+        || normalized.contains("secret=")
 }
 
 #[cfg(test)]
@@ -861,30 +1281,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn main_page_contains_phase6_control_surface_apps() {
+    async fn main_page_is_api_only_and_points_to_frontend_dashboard() {
         let html = main_page().await.0;
 
-        for label in [
-            "Meridian HyperOS",
-            "Live Positions",
-            "Candidate Radar",
-            "Cycle Logs",
-            "Recent Decisions",
-            "Manual Controls",
-            "Config Editor",
-            "Lessons",
-            "Performance",
-            "Blacklist",
-        ] {
-            assert!(html.contains(label), "missing UI label: {label}");
-        }
-        assert!(html.contains("/api/control"));
-        assert!(html.contains("/api/config"));
-        assert!(html.contains("renderStatus"));
-        assert!(html.contains("renderCandidates"));
-        assert!(html.contains("Operator-ready dashboard"));
+        assert!(html.contains("Meridian API service"));
+        assert!(html.contains("127.0.0.1:3000"));
+        assert!(!html.contains("Candidate Radar"));
+        assert!(!html.contains("Manual Controls"));
         assert!(!html.contains("cdn.tailwindcss.com"));
-        assert!(!html.contains("textContent = pretty(status)"));
     }
 
     #[test]
@@ -953,5 +1357,24 @@ mod tests {
         assert_eq!(updated.management.deploy_amount_sol, 0.42);
         assert_eq!(result["config"]["dryRun"], true);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn screening_no_deploy_reports_are_logged_as_decisions() {
+        assert!(should_append_screening_no_deploy_decision(
+            "No candidates passed filters"
+        ));
+        assert!(should_append_screening_no_deploy_decision(
+            "NO DEPLOY: candidate lacked conviction"
+        ));
+        assert!(should_append_screening_no_deploy_decision(
+            "Not enough SOL for deploy"
+        ));
+        assert!(should_append_screening_no_deploy_decision(
+            "At max positions, skipping deploy"
+        ));
+        assert!(!should_append_screening_no_deploy_decision(
+            "DEPLOY executed for candidate"
+        ));
     }
 }
