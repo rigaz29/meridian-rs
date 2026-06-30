@@ -204,7 +204,7 @@ export const ActivityWidget = ({ className = '' }: { className?: string } = {}) 
           { time: 'now', label: 'INFO', kind: 'info', pair: '-', message: `Screen ${status.schedule?.screeningIntervalMin ?? '-'}m · Manage ${status.schedule?.managementIntervalMin ?? '-'}m` },
         ] : [];
 
-        if (isMounted) setLogs(decisions.length ? decisions.slice(0, 8).map(mapDecision) : fallbackLogs);
+        if (isMounted) setLogs(decisions.length ? decisions.slice(0, 30).map(mapDecision) : fallbackLogs);
       } catch {
         if (isMounted) setLogs([]);
       }

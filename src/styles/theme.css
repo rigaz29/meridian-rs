@@ -1003,7 +1003,7 @@ h3 { font-size: 15px; }
   gap: 12px;
 }
 .activity-head { padding: 0 6px 8px; color: var(--purple); font-size: 11px; font-weight: 800; letter-spacing: .08em; border-bottom: 1px dashed rgba(168, 181, 211, 0.42); }
-.terminal-activity .log-list { display: grid; gap: 2px; margin-top: 8px; }
+.terminal-activity .log-list { display: grid; gap: 2px; margin-top: 8px; flex: 1 1 auto; min-height: 0; overflow-y: auto; align-content: start; scrollbar-width: thin; }
 .terminal-activity .log-row { min-height: 30px; padding: 0 6px; color: #aeb8cb; font-size: 12px; }
 .terminal-activity .log-row:hover { background: rgba(151, 169, 205, 0.04); }
 .terminal-activity .log-row b { width: max-content; padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: 900; letter-spacing: .04em; }
