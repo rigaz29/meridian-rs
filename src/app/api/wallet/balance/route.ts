@@ -1,6 +1,10 @@
 import { NextResponse } from 'next/server';
 
 export const runtime = 'nodejs';
+// Always re-execute — never serve a cached balance (was the main reason the
+// widget looked frozen).
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 
 // Public key of the bot wallet (a PUBLIC key — safe to read/show). Falls back to
 // the known address if the env isn't set.

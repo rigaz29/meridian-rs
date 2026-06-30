@@ -54,7 +54,7 @@ const WalletBalance = () => {
       } catch { /* keep last known */ }
     };
     load();
-    const t = window.setInterval(load, 8_000);
+    const t = window.setInterval(load, 5_000);
     return () => { mounted = false; window.clearInterval(t); };
   }, []);
   return (
