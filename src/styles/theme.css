@@ -1261,6 +1261,18 @@ h3 { font-size: 15px; }
      long — scroll the list inside a fixed box instead (header stays pinned). */
   .terminal-activity .log-list { max-height: 46vh; overflow-y: auto; flex: 0 1 auto; }
 
+  /* Candidate radar is oversized + cramped on phones — shrink the type and row
+     height, and give the score/TVL/fee columns a touch more room. */
+  .candidate-head,
+  .candidate-row { grid-template-columns: minmax(0, 1.35fr) .55fr .85fr .75fr; gap: 6px; }
+  .candidate-head { font-size: 10.5px; padding: 0 4px 9px; }
+  .candidate-list { gap: 2px; margin-top: 8px; }
+  .candidate-row { min-height: 44px; padding: 0 4px; font-size: 12px; }
+  .candidate-row strong { font-size: 12.5px; }
+  .candidate-row span { font-size: 12px; font-weight: 600; }
+  .candidate-row small { font-size: 9.5px; }
+  .candidate-row .cand-pair { gap: 7px; }
+
   /* Compact the weather widget — the 860px rule stacks it tall; keep it short
      and horizontal here. */
   .weather-main { grid-template-columns: 38px 1fr auto; gap: 10px; padding: 8px 2px 10px; }
