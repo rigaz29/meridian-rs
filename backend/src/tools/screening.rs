@@ -42,6 +42,42 @@ pub struct Screener {
     client: Client,
 }
 
+/// Entry-time market metrics captured at deploy/adopt so the Darwin learner
+/// (`signal_weights`) and lessons have real screening signals to attribute
+/// outcomes to. The LLM's `deploy_position` args only carry pool/amount/bins,
+/// so these are fetched from the pool's screening data instead.
+#[derive(Debug, Clone, Default)]
+pub struct EntryMetrics {
+    pub mcap: Option<f64>,
+    pub tvl: Option<f64>,
+    pub volume: Option<f64>,
+    pub holders: Option<u64>,
+    pub volatility: Option<f64>,
+    pub fee_tvl_ratio: Option<f64>,
+    pub organic_score: Option<f64>,
+    pub bin_step: Option<u16>,
+}
+
+/// Fetch entry metrics for a pool by re-using the screening pool-detail API.
+/// Returns `None` on any API/parse failure (callers should degrade gracefully).
+pub async fn fetch_entry_metrics(pool_address: &str, timeframe: &str) -> Option<EntryMetrics> {
+    let detail = Screener::new()
+        .get_pool_detail(pool_address, timeframe)
+        .await
+        .ok()
+        .flatten()?;
+    Some(EntryMetrics {
+        mcap: detail.base_token_mcap,
+        tvl: detail.tvl.or(detail.active_tvl),
+        volume: detail.volume,
+        holders: detail.base_token_holders,
+        volatility: detail.volatility,
+        fee_tvl_ratio: detail.fee_active_tvl_ratio,
+        organic_score: detail.base_token_organic_score,
+        bin_step: detail.dlmm_bin_step,
+    })
+}
+
 impl Screener {
     pub fn new() -> Self {
         Self {

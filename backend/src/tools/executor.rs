@@ -1580,6 +1580,15 @@ impl ToolExecutor {
                 .await
                 {
                     Ok(result) => {
+                        // Capture entry-time screening signals so the Darwin
+                        // learner (signal_weights) + lessons can attribute
+                        // outcomes. The LLM args only carry pool/amount/bins.
+                        let em = crate::tools::screening::fetch_entry_metrics(
+                            pool,
+                            &config.screening.timeframe,
+                        )
+                        .await
+                        .unwrap_or_default();
                         if result.success {
                             if let Some(position_id) = result.position.clone() {
                                 if !positions.positions.contains_key(&position_id)
@@ -1619,10 +1628,26 @@ impl ToolExecutor {
                                             .as_ref()
                                             .and_then(|range| range.active),
                                         bin_step: result.bin_step,
-                                        volatility: args["volatility"].as_f64(),
-                                        fee_tvl_ratio: args["fee_tvl_ratio"].as_f64(),
-                                        organic_score: args["organic_score"].as_f64(),
+                                        volatility: em
+                                            .volatility
+                                            .or_else(|| args["volatility"].as_f64()),
+                                        fee_tvl_ratio: em
+                                            .fee_tvl_ratio
+                                            .or_else(|| args["fee_tvl_ratio"].as_f64()),
+                                        organic_score: em
+                                            .organic_score
+                                            .or_else(|| args["organic_score"].as_f64()),
                                         initial_value_usd: args["initial_value_usd"].as_f64(),
+                                        entry_mcap: em
+                                            .mcap
+                                            .or_else(|| args["entry_mcap"].as_f64()),
+                                        entry_tvl: em.tvl.or_else(|| args["entry_tvl"].as_f64()),
+                                        entry_volume: em
+                                            .volume
+                                            .or_else(|| args["entry_volume"].as_f64()),
+                                        entry_holders: em
+                                            .holders
+                                            .or_else(|| args["entry_holders"].as_u64()),
                                         lower_bin: bin_range
                                             .as_ref()
                                             .map(|range| range.min)
@@ -1644,6 +1669,14 @@ impl ToolExecutor {
                                             "priceRange": result.price_range,
                                             "rangeCoverage": result.range_coverage,
                                             "safetyChecks": result.safety_checks,
+                                            // Screening signals read by the Darwin
+                                            // learner (signal_weights::SIGNAL_NAMES).
+                                            "organic_score": em.organic_score,
+                                            "fee_tvl_ratio": em.fee_tvl_ratio,
+                                            "volume": em.volume,
+                                            "mcap": em.mcap,
+                                            "holder_count": em.holders,
+                                            "volatility": em.volatility,
                                         })),
                                         ..crate::state::positions::TrackedPosition::default()
                                     });
@@ -1698,10 +1731,22 @@ impl ToolExecutor {
                                     .as_ref()
                                     .and_then(|range| range.active),
                                 bin_step: result.bin_step,
-                                volatility: args["volatility"].as_f64(),
-                                fee_tvl_ratio: args["fee_tvl_ratio"].as_f64(),
-                                organic_score: args["organic_score"].as_f64(),
+                                volatility: em
+                                    .volatility
+                                    .or_else(|| args["volatility"].as_f64()),
+                                fee_tvl_ratio: em
+                                    .fee_tvl_ratio
+                                    .or_else(|| args["fee_tvl_ratio"].as_f64()),
+                                organic_score: em
+                                    .organic_score
+                                    .or_else(|| args["organic_score"].as_f64()),
                                 initial_value_usd: args["initial_value_usd"].as_f64(),
+                                entry_mcap: em.mcap.or_else(|| args["entry_mcap"].as_f64()),
+                                entry_tvl: em.tvl.or_else(|| args["entry_tvl"].as_f64()),
+                                entry_volume: em.volume.or_else(|| args["entry_volume"].as_f64()),
+                                entry_holders: em
+                                    .holders
+                                    .or_else(|| args["entry_holders"].as_u64()),
                                 lower_bin: bin_range.as_ref().map(|range| range.min).unwrap_or(0),
                                 upper_bin: bin_range.as_ref().map(|range| range.max).unwrap_or(0),
                                 amount_sol: amount,
@@ -1721,6 +1766,12 @@ impl ToolExecutor {
                                     "priceRange": result.price_range,
                                     "rangeCoverage": result.range_coverage,
                                     "safetyChecks": result.safety_checks,
+                                    "organic_score": em.organic_score,
+                                    "fee_tvl_ratio": em.fee_tvl_ratio,
+                                    "volume": em.volume,
+                                    "mcap": em.mcap,
+                                    "holder_count": em.holders,
+                                    "volatility": em.volatility,
                                 })),
                                 ..crate::state::positions::TrackedPosition::default()
                             });

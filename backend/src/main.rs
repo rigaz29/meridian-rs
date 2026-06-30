@@ -147,12 +147,38 @@ async fn reconcile_positions_on_chain(
                 let base_mint = tools::meteora_native::pool_base_mint(config, &lb_pair)
                     .await
                     .unwrap_or_else(|_| lb_pair.clone());
+                // Capture entry screening signals so restart-adopted positions
+                // still feed the Darwin learner / lessons on close, instead of
+                // landing as hollow stubs with empty signal_snapshot.
+                let em = tools::screening::fetch_entry_metrics(
+                    &lb_pair,
+                    &config.screening.timeframe,
+                )
+                .await
+                .unwrap_or_default();
                 positions.adopt(state::positions::TrackedPosition {
                     id: pos_id.clone(),
                     pool_address: lb_pair.clone(),
                     pool_name: pool_name.clone(),
                     base_mint,
                     created_at: chrono::Utc::now().to_rfc3339(),
+                    volatility: em.volatility,
+                    fee_tvl_ratio: em.fee_tvl_ratio,
+                    organic_score: em.organic_score,
+                    entry_mcap: em.mcap,
+                    entry_tvl: em.tvl,
+                    entry_volume: em.volume,
+                    entry_holders: em.holders,
+                    signal_snapshot: Some(serde_json::json!({
+                        "adopted": true,
+                        "pool": lb_pair,
+                        "organic_score": em.organic_score,
+                        "fee_tvl_ratio": em.fee_tvl_ratio,
+                        "volume": em.volume,
+                        "mcap": em.mcap,
+                        "holder_count": em.holders,
+                        "volatility": em.volatility,
+                    })),
                     ..Default::default()
                 });
                 changed += 1;
