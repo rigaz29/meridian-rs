@@ -1234,14 +1234,25 @@ h3 { font-size: 15px; }
   /* cards full-width */
   .glass-card { width: 100%; }
 
-  /* HISTORICAL summary uses the same grid as the table below, so it stays
-     column-aligned with Pool/PnL/Deposit/… on mobile too. Tighten so the 5
-     single-line labels fit without wrapping (which would misalign the numbers). */
-  .portfolio-summary { gap: 9px; }
-  .portfolio-summary .ps-stat { padding-left: 9px; }
-  .portfolio-summary .ps-stat span { font-size: 10px; letter-spacing: -0.02em; }
-  .portfolio-summary .ps-stat b { font-size: 13px; }
-  .portfolio-summary .ps-stat b em { font-size: 9px; }
+  /* HISTORICAL summary: the cramped 5-across grid was tiny + tight on phones.
+     Use a roomier layout — Total PnL prominent on top, the other four in a 2×2
+     below — with bigger type and no vertical dividers. */
+  .portfolio-summary { grid-template-columns: 1fr 1fr; gap: 14px 18px; padding: 14px 4px 16px; }
+  .portfolio-summary .ps-stat { padding-left: 0; border-left: 0; }
+  .portfolio-summary .ps-stat:first-child { grid-column: 1 / -1; }
+  .portfolio-summary .ps-stat span { font-size: 11.5px; letter-spacing: -0.01em; }
+  .portfolio-summary .ps-stat b { font-size: 16px; }
+  .portfolio-summary .ps-stat:first-child b { font-size: 24px; }
+  .portfolio-summary .ps-stat b em { font-size: 11px; }
+
+  /* HISTORICAL table: shrink to match the candidate radar (was oversized). */
+  .portfolio-head,
+  .portfolio-row { gap: 8px; }
+  .portfolio-head { font-size: 10.5px; padding: 12px 4px 8px; }
+  .portfolio-rows { gap: 2px; margin-top: 6px; }
+  .portfolio-row { min-height: 44px; font-size: 12px; padding: 0 4px; font-weight: 600; }
+  .portfolio-row .pr-pool strong { font-size: 12.5px; }
+  .portfolio-row .pr-pool small { font-size: 9.5px; }
 
   /* Fixed-height tabbed card so Open and Closed share the exact same box
      height (no jump when switching tabs) and the row list scrolls inside it.
