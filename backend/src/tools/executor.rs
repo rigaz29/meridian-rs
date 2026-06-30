@@ -623,30 +623,55 @@ impl ToolExecutor {
                             .ok(),
                     };
                     if let Some(base_mint) = base_mint {
-                        match crate::tools::bollinger::entry_percent_b(config, &base_mint).await {
-                            Ok(Some(pb)) => {
-                                if pb < config.indicators.bb_percent_b_min {
+                        match crate::tools::bollinger::entry_signals(config, &base_mint).await {
+                            Ok(signals) => {
+                                // Volume-trend gate: skip pools whose volume is
+                                // decelerating. In a DLMM, fees come from volume —
+                                // slowing volume is the signal that (per large-sample
+                                // analysis) captures the catastrophic losers, with
+                                // near-zero opportunity cost. Clear thesis, simple rule.
+                                if matches!(
+                                    signals.volume_trend,
+                                    Some(crate::tools::bollinger::VolumeTrend::Decelerating)
+                                ) {
                                     anyhow::bail!(
-                                        "BB %B {:.2} < entry min {:.2} — price not over-extended, waiting for mean-reversion setup",
-                                        pb,
-                                        config.indicators.bb_percent_b_min
+                                        "volume decelerating — skipping (slowing volume drives catastrophic LP losses)"
                                     );
                                 }
-                                info(
-                                    "executor",
-                                    &format!(
-                                        "BB %B {:.2} >= {:.2} — over-extended, pullback setup OK",
-                                        pb, config.indicators.bb_percent_b_min
+
+                                // BB %B gate: only enter when price is over-extended
+                                // (pullback into our SOL-below range is more likely).
+                                match signals.percent_b {
+                                    Some(pb) => {
+                                        if pb < config.indicators.bb_percent_b_min {
+                                            anyhow::bail!(
+                                                "BB %B {:.2} < entry min {:.2} — price not over-extended, waiting for mean-reversion setup",
+                                                pb,
+                                                config.indicators.bb_percent_b_min
+                                            );
+                                        }
+                                        info(
+                                            "executor",
+                                            &format!(
+                                                "entry OK — BB %B {:.2} >= {:.2}, volume {}",
+                                                pb,
+                                                config.indicators.bb_percent_b_min,
+                                                signals
+                                                    .volume_trend
+                                                    .map(|t| t.as_str())
+                                                    .unwrap_or("unknown"),
+                                            ),
+                                        );
+                                    }
+                                    None => info(
+                                        "executor",
+                                        "BB %B unavailable (insufficient candles) — allowing deploy",
                                     ),
-                                );
+                                }
                             }
-                            Ok(None) => info(
-                                "executor",
-                                "BB %B unavailable (insufficient candles) — allowing deploy",
-                            ),
                             Err(e) => info(
                                 "executor",
-                                &format!("BB %B check skipped (error): {}", e),
+                                &format!("entry signals check skipped (error): {}", e),
                             ),
                         }
                     }

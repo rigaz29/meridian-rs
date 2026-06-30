@@ -24,8 +24,42 @@ const DEFAULT_PUBLIC_KEY: &str = "bWVyaWRpYW4taXMtdGhlLWJlc3QtYWdlbnRz";
 /// Standard Bollinger period.
 const BB_PERIOD: usize = 20;
 
-/// Fetch recent close prices (oldest→newest) for a token mint.
-async fn fetch_closes(config: &Config, mint: &str, interval: &str, candles: u32) -> Result<Vec<f64>> {
+/// Candles per window for the volume-trend comparison (12 × 5m = 1h).
+const VOL_TREND_WINDOW: usize = 12;
+
+/// Volume momentum of a pool's token, derived from OHLCV. In a DLMM, fees come
+/// from volume — slowing volume is the single signal that (per large-sample
+/// backtests) captures the catastrophic losers, so we skip Decelerating pools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VolumeTrend {
+    Accelerating,
+    Stable,
+    Decelerating,
+}
+
+impl VolumeTrend {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            VolumeTrend::Accelerating => "accelerating",
+            VolumeTrend::Stable => "stable",
+            VolumeTrend::Decelerating => "decelerating",
+        }
+    }
+}
+
+/// Both entry-timing signals computed from one OHLCV fetch.
+pub struct EntrySignals {
+    pub percent_b: Option<f64>,
+    pub volume_trend: Option<VolumeTrend>,
+}
+
+/// Fetch recent (oldest→newest) closes and volumes for a token mint.
+async fn fetch_candles(
+    config: &Config,
+    mint: &str,
+    interval: &str,
+    candles: u32,
+) -> Result<(Vec<f64>, Vec<f64>)> {
     let settings = AgentMeridianSettings::from_config(config);
     let key = settings
         .api_key
@@ -59,7 +93,41 @@ async fn fetch_closes(config: &Config, mint: &str, interval: &str, candles: u32)
         .filter_map(|c| c.get("close").and_then(Value::as_f64))
         .filter(|c| *c > 0.0)
         .collect();
-    Ok(closes)
+    let volumes: Vec<f64> = arr
+        .iter()
+        .filter_map(|c| {
+            c.get("volume")
+                .or_else(|| c.get("v"))
+                .or_else(|| c.get("vol"))
+                .and_then(Value::as_f64)
+        })
+        .filter(|v| *v >= 0.0)
+        .collect();
+    Ok((closes, volumes))
+}
+
+/// Classify volume momentum: avg of the most recent window vs the window before
+/// it. Accelerating ≥ +10%, Decelerating ≤ −10%, else Stable. None if data is
+/// insufficient (caller decides whether to allow the deploy).
+pub fn volume_trend(volumes: &[f64]) -> Option<VolumeTrend> {
+    let w = VOL_TREND_WINDOW;
+    if volumes.len() < w * 2 {
+        return None;
+    }
+    let n = volumes.len();
+    let recent = volumes[n - w..].iter().sum::<f64>() / w as f64;
+    let prior = volumes[n - 2 * w..n - w].iter().sum::<f64>() / w as f64;
+    if prior <= 0.0 {
+        return None;
+    }
+    let ratio = recent / prior;
+    Some(if ratio >= 1.10 {
+        VolumeTrend::Accelerating
+    } else if ratio <= 0.90 {
+        VolumeTrend::Decelerating
+    } else {
+        VolumeTrend::Stable
+    })
 }
 
 /// Bollinger %B of the latest close over `period`: (close - lower) / (upper -
@@ -82,20 +150,25 @@ pub fn percent_b(closes: &[f64], period: usize) -> Option<f64> {
     Some((last - lower) / (upper - lower))
 }
 
-/// Compute the entry %B for a token mint on the configured short timeframe.
-/// Ok(None) when candle data is unavailable/insufficient — the caller decides
-/// whether to allow or block the deploy in that case.
-pub async fn entry_percent_b(config: &Config, mint: &str) -> Result<Option<f64>> {
+/// Compute both entry signals (%B + volume trend) for a token mint on the
+/// configured short timeframe, from a single OHLCV fetch. Each field is None
+/// when its data is unavailable/insufficient — the caller decides whether to
+/// allow or block the deploy in that case.
+pub async fn entry_signals(config: &Config, mint: &str) -> Result<EntrySignals> {
     let interval = config
         .indicators
         .intervals
         .first()
         .cloned()
         .unwrap_or_else(|| "5_MINUTE".to_string());
-    // Fetch enough candles to cover the BB window with margin.
-    let candles = (BB_PERIOD as u32 + 40).min(config.indicators.candles.max(BB_PERIOD as u32 + 40));
-    let closes = fetch_closes(config, mint, &interval, candles).await?;
-    Ok(percent_b(&closes, BB_PERIOD))
+    // Fetch enough candles to cover the BB window + two volume windows, with margin.
+    let need = (BB_PERIOD + VOL_TREND_WINDOW * 2 + 8) as u32;
+    let candles = need.min(config.indicators.candles.max(need));
+    let (closes, volumes) = fetch_candles(config, mint, &interval, candles).await?;
+    Ok(EntrySignals {
+        percent_b: percent_b(&closes, BB_PERIOD),
+        volume_trend: volume_trend(&volumes),
+    })
 }
 
 #[cfg(test)]

@@ -104,6 +104,8 @@ const isSkip = (reason: string): boolean => {
     || r.includes('not enough sol')
     || r.includes('not supported')
     || r.includes('skipped')
+    || r.includes('skipping')
+    || r.includes('decelerat')
     || r.includes('position_id required');
 };
 
